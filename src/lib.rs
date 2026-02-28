@@ -39,6 +39,18 @@ impl TargetKind {
         matches!(self, TargetKind::DartTestLaunch | TargetKind::FlutterTestLaunch)
     }
 
+    /// Human-readable display name for error messages.
+    fn display_name(&self) -> &'static str {
+        match self {
+            TargetKind::DartLaunch => "Dart launch",
+            TargetKind::DartAttach => "Dart attach",
+            TargetKind::DartTestLaunch => "Dart test",
+            TargetKind::FlutterLaunch => "Flutter launch",
+            TargetKind::FlutterAttach => "Flutter attach",
+            TargetKind::FlutterTestLaunch => "Flutter test",
+        }
+    }
+
     /// The request kind for DAP initialization.
     fn request_kind(&self) -> StartDebuggingRequestArgumentsRequest {
         match self {
@@ -85,6 +97,57 @@ fn classify_target(
         )),
         (adapter, _, _) => Err(format!("Unknown debug adapter: {adapter}")),
     }
+}
+
+/// Validate config fields required by the target kind before handing off to the debug adapter.
+///
+/// Returns `Ok(())` if valid, or an actionable error message if required fields are missing.
+fn validate_config(target: TargetKind, config: &serde_json::Value) -> Result<(), String> {
+    match target.request_kind() {
+        StartDebuggingRequestArgumentsRequest::Launch => {
+            // Test mode doesn't require 'program' — the test runner discovers tests.
+            if !target.is_test() {
+                match config.get("program").and_then(|v| v.as_str()) {
+                    None => {
+                        return Err(format!(
+                            "{}: Launch configuration requires a 'program' field. \
+                             Set it to the Dart file to run (e.g., \"bin/main.dart\").",
+                            target.display_name()
+                        ));
+                    }
+                    Some(p) if p.is_empty() => {
+                        return Err(format!(
+                            "{}: 'program' field must not be empty. \
+                             Set it to the Dart file to run (e.g., \"bin/main.dart\").",
+                            target.display_name()
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        StartDebuggingRequestArgumentsRequest::Attach => {
+            match config.get("vmServiceUri").and_then(|v| v.as_str()) {
+                None => {
+                    return Err(format!(
+                        "{}: Attach configuration requires a 'vmServiceUri' field. \
+                         Set it to the Dart VM service URI (e.g., \"ws://127.0.0.1:8181/abcd=/ws\").",
+                        target.display_name()
+                    ));
+                }
+                Some(uri) if uri.is_empty() => {
+                    return Err(format!(
+                        "{}: 'vmServiceUri' must not be empty. \
+                         Set it to the Dart VM service URI (e.g., \"ws://127.0.0.1:8181/abcd=/ws\").",
+                        target.display_name()
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Build a `DebugAdapterBinary` from a resolved binary path, target kind, and config.
@@ -143,7 +206,12 @@ impl zed::Extension for DartDapExtension {
         let config_value: serde_json::Value = serde_json::from_str(&config.config)
             .map_err(|e| format!("Failed to parse debug config JSON: {e}"))?;
 
+        if !config_value.is_object() {
+            return Err("Debug configuration must be a JSON object.".to_string());
+        }
+
         let target = classify_target(&adapter_name, &config_value)?;
+        validate_config(target, &config_value)?;
 
         let command = match target {
             TargetKind::DartLaunch | TargetKind::DartAttach | TargetKind::DartTestLaunch => {
@@ -1046,5 +1114,102 @@ mod tests {
             raw,
         );
         assert!(bin.envs.is_empty());
+    }
+
+    // --- validate_config tests ---
+
+    #[test]
+    fn validate_launch_missing_program() {
+        let config = serde_json::json!({"request": "launch"});
+        let err = validate_config(TargetKind::DartLaunch, &config).unwrap_err();
+        assert!(err.contains("Dart launch"), "error should name the target: {err}");
+        assert!(err.contains("program"), "error should mention 'program': {err}");
+    }
+
+    #[test]
+    fn validate_launch_empty_program() {
+        let config = serde_json::json!({"request": "launch", "program": ""});
+        let err = validate_config(TargetKind::DartLaunch, &config).unwrap_err();
+        assert!(err.contains("must not be empty"), "error should say empty: {err}");
+    }
+
+    #[test]
+    fn validate_launch_valid_program() {
+        let config = serde_json::json!({"request": "launch", "program": "bin/main.dart"});
+        assert!(validate_config(TargetKind::DartLaunch, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_launch_program_non_string_treated_as_missing() {
+        let config = serde_json::json!({"request": "launch", "program": 42});
+        let err = validate_config(TargetKind::DartLaunch, &config).unwrap_err();
+        assert!(err.contains("program"), "error should mention 'program': {err}");
+    }
+
+    #[test]
+    fn validate_attach_missing_vm_service_uri() {
+        let config = serde_json::json!({"request": "attach"});
+        let err = validate_config(TargetKind::DartAttach, &config).unwrap_err();
+        assert!(err.contains("Dart attach"), "error should name the target: {err}");
+        assert!(err.contains("vmServiceUri"), "error should mention 'vmServiceUri': {err}");
+    }
+
+    #[test]
+    fn validate_attach_empty_vm_service_uri() {
+        let config = serde_json::json!({"request": "attach", "vmServiceUri": ""});
+        let err = validate_config(TargetKind::DartAttach, &config).unwrap_err();
+        assert!(err.contains("must not be empty"), "error should say empty: {err}");
+    }
+
+    #[test]
+    fn validate_attach_valid_vm_service_uri() {
+        let config = serde_json::json!({"request": "attach", "vmServiceUri": "ws://127.0.0.1:8181/ws"});
+        assert!(validate_config(TargetKind::DartAttach, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_attach_vm_service_uri_non_string_treated_as_missing() {
+        let config = serde_json::json!({"request": "attach", "vmServiceUri": true});
+        let err = validate_config(TargetKind::DartAttach, &config).unwrap_err();
+        assert!(err.contains("vmServiceUri"), "error should mention 'vmServiceUri': {err}");
+    }
+
+    #[test]
+    fn validate_flutter_launch_missing_program() {
+        let config = serde_json::json!({"request": "launch"});
+        let err = validate_config(TargetKind::FlutterLaunch, &config).unwrap_err();
+        assert!(err.contains("Flutter launch"), "error should name the target: {err}");
+    }
+
+    #[test]
+    fn validate_flutter_attach_missing_vm_service_uri() {
+        let config = serde_json::json!({"request": "attach"});
+        let err = validate_config(TargetKind::FlutterAttach, &config).unwrap_err();
+        assert!(err.contains("Flutter attach"), "error should name the target: {err}");
+    }
+
+    #[test]
+    fn validate_test_launch_skips_program_check() {
+        // Test mode doesn't require 'program' — tests are discovered automatically
+        let config = serde_json::json!({"request": "launch", "testMode": true});
+        assert!(validate_config(TargetKind::DartTestLaunch, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_flutter_test_launch_skips_program_check() {
+        let config = serde_json::json!({"request": "launch", "testMode": true});
+        assert!(validate_config(TargetKind::FlutterTestLaunch, &config).is_ok());
+    }
+
+    // --- TargetKind::display_name tests ---
+
+    #[test]
+    fn target_kind_display_names() {
+        assert_eq!(TargetKind::DartLaunch.display_name(), "Dart launch");
+        assert_eq!(TargetKind::DartAttach.display_name(), "Dart attach");
+        assert_eq!(TargetKind::DartTestLaunch.display_name(), "Dart test");
+        assert_eq!(TargetKind::FlutterLaunch.display_name(), "Flutter launch");
+        assert_eq!(TargetKind::FlutterAttach.display_name(), "Flutter attach");
+        assert_eq!(TargetKind::FlutterTestLaunch.display_name(), "Flutter test");
     }
 }

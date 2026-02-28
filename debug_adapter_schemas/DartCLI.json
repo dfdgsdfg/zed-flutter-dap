@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Dart CLI Debug Configuration",
+  "description": "Configuration for debugging Dart CLI applications and tests using the official Dart SDK debug adapter",
+  "type": "object",
+  "properties": {
+    "adapter": {
+      "type": "string",
+      "enum": ["DartCLI"],
+      "description": "Debug adapter identifier"
+    },
+    "label": {
+      "type": "string",
+      "description": "Human-readable label for this debug configuration"
+    },
+    "request": {
+      "type": "string",
+      "enum": ["launch", "attach"],
+      "description": "Whether to launch a new process or attach to an existing one"
+    },
+    "program": {
+      "type": "string",
+      "description": "Path to the Dart file to run (relative to cwd)"
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Working directory for the debug session",
+      "default": "$ZED_WORKTREE_ROOT"
+    },
+    "args": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Command-line arguments passed to the Dart program",
+      "default": []
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Environment variables for the debug session",
+      "default": {}
+    },
+    "vmServiceUri": {
+      "type": "string",
+      "description": "VM service URI for attach mode (e.g., ws://127.0.0.1:8181/abcd=/ws)"
+    },
+    "testMode": {
+      "type": "boolean",
+      "description": "Run using the test debug adapter (dart debug_adapter --test)",
+      "default": false
+    },
+    "dartSdkPath": {
+      "type": "string",
+      "description": "Optional explicit path to the Dart SDK binary"
+    },
+    "stopOnEntry": {
+      "type": "boolean",
+      "description": "Pause execution at the program entry point",
+      "default": false
+    }
+  },
+  "required": ["adapter", "label", "request"],
+  "oneOf": [
+    {
+      "properties": {
+        "request": { "const": "launch" }
+      },
+      "required": ["program"]
+    },
+    {
+      "properties": {
+        "request": { "const": "attach" }
+      },
+      "required": ["vmServiceUri"]
+    }
+  ]
+}

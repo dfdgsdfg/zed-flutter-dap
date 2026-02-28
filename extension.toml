@@ -1,0 +1,13 @@
+id = "zed-dart-dap"
+name = "Dart & Flutter Debugger"
+version = "0.1.0"
+schema_version = 1
+authors = ["dididi"]
+description = "Debug Adapter Protocol support for Dart CLI apps, Flutter apps, and tests using official SDK debug adapters"
+repository = "https://github.com/dididi/zed-dart-dap"
+
+[debug_adapters.DartCLI]
+schema_path = "debug_adapter_schemas/DartCLI.json"
+
+[debug_adapters.DartFlutter]
+schema_path = "debug_adapter_schemas/DartFlutter.json"

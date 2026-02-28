@@ -1,7 +1,6 @@
 use zed_extension_api::{
-    self as zed, DebugAdapterBinary, DebugConfig, DebugRequest, DebugScenario,
-    DebugTaskDefinition, StartDebuggingRequestArguments,
-    StartDebuggingRequestArgumentsRequest, Worktree,
+    self as zed, DebugAdapterBinary, DebugConfig, DebugRequest, DebugScenario, DebugTaskDefinition,
+    StartDebuggingRequestArguments, StartDebuggingRequestArgumentsRequest, Worktree,
 };
 
 /// Adapter name for Dart CLI debugging (launch, attach, test).
@@ -28,15 +27,18 @@ impl TargetKind {
             TargetKind::DartLaunch | TargetKind::DartAttach | TargetKind::DartTestLaunch => {
                 "debug_adapter"
             }
-            TargetKind::FlutterLaunch | TargetKind::FlutterAttach | TargetKind::FlutterTestLaunch => {
-                "debug-adapter"
-            }
+            TargetKind::FlutterLaunch
+            | TargetKind::FlutterAttach
+            | TargetKind::FlutterTestLaunch => "debug-adapter",
         }
     }
 
     /// Whether the `--test` flag should be appended.
     fn is_test(&self) -> bool {
-        matches!(self, TargetKind::DartTestLaunch | TargetKind::FlutterTestLaunch)
+        matches!(
+            self,
+            TargetKind::DartTestLaunch | TargetKind::FlutterTestLaunch
+        )
     }
 
     /// Human-readable display name for error messages.
@@ -54,9 +56,10 @@ impl TargetKind {
     /// The request kind for DAP initialization.
     fn request_kind(&self) -> StartDebuggingRequestArgumentsRequest {
         match self {
-            TargetKind::DartLaunch | TargetKind::DartTestLaunch | TargetKind::FlutterLaunch | TargetKind::FlutterTestLaunch => {
-                StartDebuggingRequestArgumentsRequest::Launch
-            }
+            TargetKind::DartLaunch
+            | TargetKind::DartTestLaunch
+            | TargetKind::FlutterLaunch
+            | TargetKind::FlutterTestLaunch => StartDebuggingRequestArgumentsRequest::Launch,
             TargetKind::DartAttach | TargetKind::FlutterAttach => {
                 StartDebuggingRequestArgumentsRequest::Attach
             }
@@ -65,10 +68,7 @@ impl TargetKind {
 }
 
 /// Classify a debug configuration into a normalized target kind.
-fn classify_target(
-    adapter_name: &str,
-    config: &serde_json::Value,
-) -> Result<TargetKind, String> {
+fn classify_target(adapter_name: &str, config: &serde_json::Value) -> Result<TargetKind, String> {
     let request = config
         .get("request")
         .and_then(|v| v.as_str())
@@ -83,15 +83,15 @@ fn classify_target(
         (ADAPTER_DART_CLI, "launch", false) => Ok(TargetKind::DartLaunch),
         (ADAPTER_DART_CLI, "attach", false) => Ok(TargetKind::DartAttach),
         (ADAPTER_DART_CLI, "launch", true) => Ok(TargetKind::DartTestLaunch),
-        (ADAPTER_DART_CLI, "attach", true) => Err(
-            "Test mode is not supported with attach requests for DartCLI.".to_string(),
-        ),
+        (ADAPTER_DART_CLI, "attach", true) => {
+            Err("Test mode is not supported with attach requests for DartCLI.".to_string())
+        }
         (ADAPTER_DART_FLUTTER, "launch", false) => Ok(TargetKind::FlutterLaunch),
         (ADAPTER_DART_FLUTTER, "attach", false) => Ok(TargetKind::FlutterAttach),
         (ADAPTER_DART_FLUTTER, "launch", true) => Ok(TargetKind::FlutterTestLaunch),
-        (ADAPTER_DART_FLUTTER, "attach", true) => Err(
-            "Test mode is not supported with attach requests for DartFlutter.".to_string(),
-        ),
+        (ADAPTER_DART_FLUTTER, "attach", true) => {
+            Err("Test mode is not supported with attach requests for DartFlutter.".to_string())
+        }
         (_, request, _) if request != "launch" && request != "attach" => Err(format!(
             "Invalid 'request' value: '{request}'. Expected 'launch' or 'attach'."
         )),
@@ -115,7 +115,7 @@ fn validate_config(target: TargetKind, config: &serde_json::Value) -> Result<(),
                             target.display_name()
                         ));
                     }
-                    Some(p) if p.is_empty() => {
+                    Some("") => {
                         return Err(format!(
                             "{}: 'program' field must not be empty. \
                              Set it to the Dart file to run (e.g., \"bin/main.dart\").",
@@ -135,7 +135,7 @@ fn validate_config(target: TargetKind, config: &serde_json::Value) -> Result<(),
                         target.display_name()
                     ));
                 }
-                Some(uri) if uri.is_empty() => {
+                Some("") => {
                     return Err(format!(
                         "{}: 'vmServiceUri' must not be empty. \
                          Set it to the Dart VM service URI (e.g., \"ws://127.0.0.1:8181/abcd=/ws\").",
@@ -168,10 +168,7 @@ fn build_debug_adapter_binary(
         command: Some(command),
         arguments,
         envs: collect_env(config),
-        cwd: config
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        cwd: config.get("cwd").and_then(|v| v.as_str()).map(String::from),
         connection: None,
         request_args: StartDebuggingRequestArguments {
             configuration: raw_config,
@@ -217,9 +214,9 @@ impl zed::Extension for DartDapExtension {
             TargetKind::DartLaunch | TargetKind::DartAttach | TargetKind::DartTestLaunch => {
                 resolve_dart_binary(&config_value, worktree)?
             }
-            TargetKind::FlutterLaunch | TargetKind::FlutterAttach | TargetKind::FlutterTestLaunch => {
-                resolve_flutter_binary(&config_value, worktree)?
-            }
+            TargetKind::FlutterLaunch
+            | TargetKind::FlutterAttach
+            | TargetKind::FlutterTestLaunch => resolve_flutter_binary(&config_value, worktree)?,
         };
 
         Ok(build_debug_adapter_binary(
@@ -238,10 +235,7 @@ impl zed::Extension for DartDapExtension {
         resolve_request_kind(&config)
     }
 
-    fn dap_config_to_scenario(
-        &mut self,
-        config: DebugConfig,
-    ) -> Result<DebugScenario, String> {
+    fn dap_config_to_scenario(&mut self, config: DebugConfig) -> Result<DebugScenario, String> {
         let adapter = if config.adapter == ADAPTER_DART_FLUTTER {
             ADAPTER_DART_FLUTTER
         } else {
@@ -304,10 +298,7 @@ fn resolve_request_kind(
 }
 
 /// Resolve the `dart` binary path from config override or worktree PATH.
-fn resolve_dart_binary(
-    config: &serde_json::Value,
-    worktree: &Worktree,
-) -> Result<String, String> {
+fn resolve_dart_binary(config: &serde_json::Value, worktree: &Worktree) -> Result<String, String> {
     if let Some(path) = sdk_path_override(config, "dartSdkPath") {
         return Ok(path);
     }
@@ -386,14 +377,20 @@ mod tests {
     fn resolve_request_kind_invalid_value() {
         let config = serde_json::json!({"request": "run"});
         let err = resolve_request_kind(&config).unwrap_err();
-        assert!(err.contains("run"), "error should mention the invalid value");
+        assert!(
+            err.contains("run"),
+            "error should mention the invalid value"
+        );
     }
 
     #[test]
     fn resolve_request_kind_missing_field() {
         let config = serde_json::json!({"program": "main.dart"});
         let err = resolve_request_kind(&config).unwrap_err();
-        assert!(err.contains("Missing"), "error should indicate missing field");
+        assert!(
+            err.contains("Missing"),
+            "error should indicate missing field"
+        );
     }
 
     #[test]
@@ -415,25 +412,37 @@ mod tests {
     #[test]
     fn classify_dart_launch() {
         let config = serde_json::json!({"request": "launch"});
-        assert_eq!(classify_target("DartCLI", &config).unwrap(), TargetKind::DartLaunch);
+        assert_eq!(
+            classify_target("DartCLI", &config).unwrap(),
+            TargetKind::DartLaunch
+        );
     }
 
     #[test]
     fn classify_dart_attach() {
         let config = serde_json::json!({"request": "attach"});
-        assert_eq!(classify_target("DartCLI", &config).unwrap(), TargetKind::DartAttach);
+        assert_eq!(
+            classify_target("DartCLI", &config).unwrap(),
+            TargetKind::DartAttach
+        );
     }
 
     #[test]
     fn classify_dart_test_launch() {
         let config = serde_json::json!({"request": "launch", "testMode": true});
-        assert_eq!(classify_target("DartCLI", &config).unwrap(), TargetKind::DartTestLaunch);
+        assert_eq!(
+            classify_target("DartCLI", &config).unwrap(),
+            TargetKind::DartTestLaunch
+        );
     }
 
     #[test]
     fn classify_dart_test_false_is_normal_launch() {
         let config = serde_json::json!({"request": "launch", "testMode": false});
-        assert_eq!(classify_target("DartCLI", &config).unwrap(), TargetKind::DartLaunch);
+        assert_eq!(
+            classify_target("DartCLI", &config).unwrap(),
+            TargetKind::DartLaunch
+        );
     }
 
     #[test]
@@ -446,19 +455,28 @@ mod tests {
     #[test]
     fn classify_flutter_launch() {
         let config = serde_json::json!({"request": "launch"});
-        assert_eq!(classify_target("DartFlutter", &config).unwrap(), TargetKind::FlutterLaunch);
+        assert_eq!(
+            classify_target("DartFlutter", &config).unwrap(),
+            TargetKind::FlutterLaunch
+        );
     }
 
     #[test]
     fn classify_flutter_attach() {
         let config = serde_json::json!({"request": "attach"});
-        assert_eq!(classify_target("DartFlutter", &config).unwrap(), TargetKind::FlutterAttach);
+        assert_eq!(
+            classify_target("DartFlutter", &config).unwrap(),
+            TargetKind::FlutterAttach
+        );
     }
 
     #[test]
     fn classify_flutter_test_launch() {
         let config = serde_json::json!({"request": "launch", "testMode": true});
-        assert_eq!(classify_target("DartFlutter", &config).unwrap(), TargetKind::FlutterTestLaunch);
+        assert_eq!(
+            classify_target("DartFlutter", &config).unwrap(),
+            TargetKind::FlutterTestLaunch
+        );
     }
 
     #[test]
@@ -495,10 +513,22 @@ mod tests {
     fn target_kind_subcommands() {
         assert_eq!(TargetKind::DartLaunch.adapter_subcommand(), "debug_adapter");
         assert_eq!(TargetKind::DartAttach.adapter_subcommand(), "debug_adapter");
-        assert_eq!(TargetKind::DartTestLaunch.adapter_subcommand(), "debug_adapter");
-        assert_eq!(TargetKind::FlutterLaunch.adapter_subcommand(), "debug-adapter");
-        assert_eq!(TargetKind::FlutterAttach.adapter_subcommand(), "debug-adapter");
-        assert_eq!(TargetKind::FlutterTestLaunch.adapter_subcommand(), "debug-adapter");
+        assert_eq!(
+            TargetKind::DartTestLaunch.adapter_subcommand(),
+            "debug_adapter"
+        );
+        assert_eq!(
+            TargetKind::FlutterLaunch.adapter_subcommand(),
+            "debug-adapter"
+        );
+        assert_eq!(
+            TargetKind::FlutterAttach.adapter_subcommand(),
+            "debug-adapter"
+        );
+        assert_eq!(
+            TargetKind::FlutterTestLaunch.adapter_subcommand(),
+            "debug-adapter"
+        );
     }
 
     #[test]
@@ -513,12 +543,30 @@ mod tests {
 
     #[test]
     fn target_kind_request_kinds() {
-        assert_eq!(TargetKind::DartLaunch.request_kind(), StartDebuggingRequestArgumentsRequest::Launch);
-        assert_eq!(TargetKind::DartAttach.request_kind(), StartDebuggingRequestArgumentsRequest::Attach);
-        assert_eq!(TargetKind::DartTestLaunch.request_kind(), StartDebuggingRequestArgumentsRequest::Launch);
-        assert_eq!(TargetKind::FlutterLaunch.request_kind(), StartDebuggingRequestArgumentsRequest::Launch);
-        assert_eq!(TargetKind::FlutterAttach.request_kind(), StartDebuggingRequestArgumentsRequest::Attach);
-        assert_eq!(TargetKind::FlutterTestLaunch.request_kind(), StartDebuggingRequestArgumentsRequest::Launch);
+        assert_eq!(
+            TargetKind::DartLaunch.request_kind(),
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
+        assert_eq!(
+            TargetKind::DartAttach.request_kind(),
+            StartDebuggingRequestArgumentsRequest::Attach
+        );
+        assert_eq!(
+            TargetKind::DartTestLaunch.request_kind(),
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
+        assert_eq!(
+            TargetKind::FlutterLaunch.request_kind(),
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
+        assert_eq!(
+            TargetKind::FlutterAttach.request_kind(),
+            StartDebuggingRequestArgumentsRequest::Attach
+        );
+        assert_eq!(
+            TargetKind::FlutterTestLaunch.request_kind(),
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
     }
 
     // --- collect_env tests ---
@@ -528,10 +576,13 @@ mod tests {
         let config = serde_json::json!({"env": {"FOO": "bar", "BAZ": "qux"}});
         let mut envs = collect_env(&config);
         envs.sort();
-        assert_eq!(envs, vec![
-            ("BAZ".to_string(), "qux".to_string()),
-            ("FOO".to_string(), "bar".to_string()),
-        ]);
+        assert_eq!(
+            envs,
+            vec![
+                ("BAZ".to_string(), "qux".to_string()),
+                ("FOO".to_string(), "bar".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -603,7 +654,10 @@ mod tests {
                 program: program.to_string(),
                 cwd: Some("/workspace".to_string()),
                 args: vec!["--verbose".to_string()],
-                envs: vec![("DART_VM_OPTIONS".to_string(), "--enable-asserts".to_string())],
+                envs: vec![(
+                    "DART_VM_OPTIONS".to_string(),
+                    "--enable-asserts".to_string(),
+                )],
             }),
             stop_on_entry: Some(true),
         }
@@ -1032,9 +1086,18 @@ mod tests {
         assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
         assert_eq!(bin.arguments, vec!["debug_adapter"]);
         assert_eq!(bin.cwd, Some("/workspace/my_app".to_string()));
-        assert_eq!(bin.envs, vec![("DART_VM_OPTIONS".to_string(), "--enable-asserts".to_string())]);
+        assert_eq!(
+            bin.envs,
+            vec![(
+                "DART_VM_OPTIONS".to_string(),
+                "--enable-asserts".to_string()
+            )]
+        );
         assert!(bin.connection.is_none());
-        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Launch);
+        assert_eq!(
+            bin.request_args.request,
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
     }
 
     #[test]
@@ -1042,7 +1105,10 @@ mod tests {
         let bin = make_descriptor(TargetKind::DartAttach);
         assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
         assert_eq!(bin.arguments, vec!["debug_adapter"]);
-        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Attach);
+        assert_eq!(
+            bin.request_args.request,
+            StartDebuggingRequestArgumentsRequest::Attach
+        );
     }
 
     #[test]
@@ -1050,7 +1116,10 @@ mod tests {
         let bin = make_descriptor(TargetKind::DartTestLaunch);
         assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
         assert_eq!(bin.arguments, vec!["debug_adapter", "--test"]);
-        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Launch);
+        assert_eq!(
+            bin.request_args.request,
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
     }
 
     #[test]
@@ -1058,7 +1127,10 @@ mod tests {
         let bin = make_descriptor(TargetKind::FlutterLaunch);
         assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
         assert_eq!(bin.arguments, vec!["debug-adapter"]);
-        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Launch);
+        assert_eq!(
+            bin.request_args.request,
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
     }
 
     #[test]
@@ -1066,7 +1138,10 @@ mod tests {
         let bin = make_descriptor(TargetKind::FlutterAttach);
         assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
         assert_eq!(bin.arguments, vec!["debug-adapter"]);
-        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Attach);
+        assert_eq!(
+            bin.request_args.request,
+            StartDebuggingRequestArgumentsRequest::Attach
+        );
     }
 
     #[test]
@@ -1074,7 +1149,10 @@ mod tests {
         let bin = make_descriptor(TargetKind::FlutterTestLaunch);
         assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
         assert_eq!(bin.arguments, vec!["debug-adapter", "--test"]);
-        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Launch);
+        assert_eq!(
+            bin.request_args.request,
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
     }
 
     #[test]
@@ -1094,12 +1172,8 @@ mod tests {
     fn descriptor_no_cwd_when_absent() {
         let config = serde_json::json!({"request": "launch", "program": "main.dart"});
         let raw = config.to_string();
-        let bin = build_debug_adapter_binary(
-            "dart".to_string(),
-            TargetKind::DartLaunch,
-            &config,
-            raw,
-        );
+        let bin =
+            build_debug_adapter_binary("dart".to_string(), TargetKind::DartLaunch, &config, raw);
         assert!(bin.cwd.is_none());
     }
 
@@ -1107,12 +1181,8 @@ mod tests {
     fn descriptor_empty_env_when_absent() {
         let config = serde_json::json!({"request": "launch", "program": "main.dart"});
         let raw = config.to_string();
-        let bin = build_debug_adapter_binary(
-            "dart".to_string(),
-            TargetKind::DartLaunch,
-            &config,
-            raw,
-        );
+        let bin =
+            build_debug_adapter_binary("dart".to_string(), TargetKind::DartLaunch, &config, raw);
         assert!(bin.envs.is_empty());
     }
 
@@ -1122,15 +1192,24 @@ mod tests {
     fn validate_launch_missing_program() {
         let config = serde_json::json!({"request": "launch"});
         let err = validate_config(TargetKind::DartLaunch, &config).unwrap_err();
-        assert!(err.contains("Dart launch"), "error should name the target: {err}");
-        assert!(err.contains("program"), "error should mention 'program': {err}");
+        assert!(
+            err.contains("Dart launch"),
+            "error should name the target: {err}"
+        );
+        assert!(
+            err.contains("program"),
+            "error should mention 'program': {err}"
+        );
     }
 
     #[test]
     fn validate_launch_empty_program() {
         let config = serde_json::json!({"request": "launch", "program": ""});
         let err = validate_config(TargetKind::DartLaunch, &config).unwrap_err();
-        assert!(err.contains("must not be empty"), "error should say empty: {err}");
+        assert!(
+            err.contains("must not be empty"),
+            "error should say empty: {err}"
+        );
     }
 
     #[test]
@@ -1143,27 +1222,40 @@ mod tests {
     fn validate_launch_program_non_string_treated_as_missing() {
         let config = serde_json::json!({"request": "launch", "program": 42});
         let err = validate_config(TargetKind::DartLaunch, &config).unwrap_err();
-        assert!(err.contains("program"), "error should mention 'program': {err}");
+        assert!(
+            err.contains("program"),
+            "error should mention 'program': {err}"
+        );
     }
 
     #[test]
     fn validate_attach_missing_vm_service_uri() {
         let config = serde_json::json!({"request": "attach"});
         let err = validate_config(TargetKind::DartAttach, &config).unwrap_err();
-        assert!(err.contains("Dart attach"), "error should name the target: {err}");
-        assert!(err.contains("vmServiceUri"), "error should mention 'vmServiceUri': {err}");
+        assert!(
+            err.contains("Dart attach"),
+            "error should name the target: {err}"
+        );
+        assert!(
+            err.contains("vmServiceUri"),
+            "error should mention 'vmServiceUri': {err}"
+        );
     }
 
     #[test]
     fn validate_attach_empty_vm_service_uri() {
         let config = serde_json::json!({"request": "attach", "vmServiceUri": ""});
         let err = validate_config(TargetKind::DartAttach, &config).unwrap_err();
-        assert!(err.contains("must not be empty"), "error should say empty: {err}");
+        assert!(
+            err.contains("must not be empty"),
+            "error should say empty: {err}"
+        );
     }
 
     #[test]
     fn validate_attach_valid_vm_service_uri() {
-        let config = serde_json::json!({"request": "attach", "vmServiceUri": "ws://127.0.0.1:8181/ws"});
+        let config =
+            serde_json::json!({"request": "attach", "vmServiceUri": "ws://127.0.0.1:8181/ws"});
         assert!(validate_config(TargetKind::DartAttach, &config).is_ok());
     }
 
@@ -1171,21 +1263,30 @@ mod tests {
     fn validate_attach_vm_service_uri_non_string_treated_as_missing() {
         let config = serde_json::json!({"request": "attach", "vmServiceUri": true});
         let err = validate_config(TargetKind::DartAttach, &config).unwrap_err();
-        assert!(err.contains("vmServiceUri"), "error should mention 'vmServiceUri': {err}");
+        assert!(
+            err.contains("vmServiceUri"),
+            "error should mention 'vmServiceUri': {err}"
+        );
     }
 
     #[test]
     fn validate_flutter_launch_missing_program() {
         let config = serde_json::json!({"request": "launch"});
         let err = validate_config(TargetKind::FlutterLaunch, &config).unwrap_err();
-        assert!(err.contains("Flutter launch"), "error should name the target: {err}");
+        assert!(
+            err.contains("Flutter launch"),
+            "error should name the target: {err}"
+        );
     }
 
     #[test]
     fn validate_flutter_attach_missing_vm_service_uri() {
         let config = serde_json::json!({"request": "attach"});
         let err = validate_config(TargetKind::FlutterAttach, &config).unwrap_err();
-        assert!(err.contains("Flutter attach"), "error should name the target: {err}");
+        assert!(
+            err.contains("Flutter attach"),
+            "error should name the target: {err}"
+        );
     }
 
     #[test]

@@ -644,4 +644,238 @@ mod tests {
 
         assert_eq!(scenario.label, "My Custom Label");
     }
+
+    // --- Schema validation tests ---
+
+    const DART_CLI_SCHEMA: &str = include_str!("../debug_adapter_schemas/DartCLI.json");
+    const DART_FLUTTER_SCHEMA: &str = include_str!("../debug_adapter_schemas/DartFlutter.json");
+
+    /// Helper: parse a schema and return its Value.
+    fn parse_schema(raw: &str) -> serde_json::Value {
+        serde_json::from_str(raw).expect("Schema must be valid JSON")
+    }
+
+    #[test]
+    fn schema_dart_cli_is_valid_json() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["$schema"], "http://json-schema.org/draft-07/schema#");
+        assert!(schema["title"].as_str().unwrap().contains("Dart CLI"));
+    }
+
+    #[test]
+    fn schema_dart_flutter_is_valid_json() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["$schema"], "http://json-schema.org/draft-07/schema#");
+        assert!(schema["title"].as_str().unwrap().contains("Flutter"));
+    }
+
+    #[test]
+    fn schema_dart_cli_required_fields() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"adapter"));
+        assert!(required.contains(&"label"));
+        assert!(required.contains(&"request"));
+    }
+
+    #[test]
+    fn schema_dart_flutter_required_fields() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"adapter"));
+        assert!(required.contains(&"label"));
+        assert!(required.contains(&"request"));
+    }
+
+    #[test]
+    fn schema_dart_cli_adapter_enum_matches_constant() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        let adapter_enum = schema["properties"]["adapter"]["enum"].as_array().unwrap();
+        assert_eq!(adapter_enum.len(), 1);
+        assert_eq!(adapter_enum[0], ADAPTER_DART_CLI);
+    }
+
+    #[test]
+    fn schema_dart_flutter_adapter_enum_matches_constant() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        let adapter_enum = schema["properties"]["adapter"]["enum"].as_array().unwrap();
+        assert_eq!(adapter_enum.len(), 1);
+        assert_eq!(adapter_enum[0], ADAPTER_DART_FLUTTER);
+    }
+
+    #[test]
+    fn schema_dart_cli_request_enum() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        let request_enum = schema["properties"]["request"]["enum"].as_array().unwrap();
+        let values: Vec<&str> = request_enum.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(values.len(), 2);
+        assert!(values.contains(&"launch"));
+        assert!(values.contains(&"attach"));
+    }
+
+    #[test]
+    fn schema_dart_flutter_request_enum() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        let request_enum = schema["properties"]["request"]["enum"].as_array().unwrap();
+        let values: Vec<&str> = request_enum.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(values.len(), 2);
+        assert!(values.contains(&"launch"));
+        assert!(values.contains(&"attach"));
+    }
+
+    /// Helper: find a oneOf variant by request const value.
+    fn find_one_of_variant<'a>(
+        schema: &'a serde_json::Value,
+        request_value: &str,
+    ) -> &'a serde_json::Value {
+        schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["properties"]["request"]["const"] == request_value)
+            .unwrap_or_else(|| panic!("oneOf variant for '{request_value}' not found"))
+    }
+
+    #[test]
+    fn schema_dart_cli_one_of_has_two_variants() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        assert_eq!(schema["oneOf"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn schema_dart_cli_launch_requires_program() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        let launch = find_one_of_variant(&schema, "launch");
+        let required: Vec<&str> = launch["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"program"));
+    }
+
+    #[test]
+    fn schema_dart_cli_attach_requires_vm_service_uri() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        let attach = find_one_of_variant(&schema, "attach");
+        let required: Vec<&str> = attach["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"vmServiceUri"));
+    }
+
+    #[test]
+    fn schema_dart_flutter_one_of_has_two_variants() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        assert_eq!(schema["oneOf"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn schema_dart_flutter_launch_requires_program() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        let launch = find_one_of_variant(&schema, "launch");
+        let required: Vec<&str> = launch["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"program"));
+    }
+
+    #[test]
+    fn schema_dart_flutter_attach_requires_vm_service_uri() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        let attach = find_one_of_variant(&schema, "attach");
+        let required: Vec<&str> = attach["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"vmServiceUri"));
+    }
+
+    #[test]
+    fn schema_dart_cli_defaults() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        let props = &schema["properties"];
+        assert_eq!(props["cwd"]["default"], "$ZED_WORKTREE_ROOT");
+        assert_eq!(props["args"]["default"], serde_json::json!([]));
+        assert_eq!(props["env"]["default"], serde_json::json!({}));
+        assert_eq!(props["testMode"]["default"], false);
+        assert_eq!(props["stopOnEntry"]["default"], false);
+    }
+
+    #[test]
+    fn schema_dart_flutter_defaults() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        let props = &schema["properties"];
+        assert_eq!(props["cwd"]["default"], "$ZED_WORKTREE_ROOT");
+        assert_eq!(props["args"]["default"], serde_json::json!([]));
+        assert_eq!(props["env"]["default"], serde_json::json!({}));
+        assert_eq!(props["testMode"]["default"], false);
+        assert_eq!(props["stopOnEntry"]["default"], false);
+        assert_eq!(props["program"]["default"], "lib/main.dart");
+    }
+
+    #[test]
+    fn schema_dart_cli_property_types() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        let props = &schema["properties"];
+        assert_eq!(props["program"]["type"], "string");
+        assert_eq!(props["cwd"]["type"], "string");
+        assert_eq!(props["args"]["type"], "array");
+        assert_eq!(props["env"]["type"], "object");
+        assert_eq!(props["vmServiceUri"]["type"], "string");
+        assert_eq!(props["testMode"]["type"], "boolean");
+        assert_eq!(props["dartSdkPath"]["type"], "string");
+        assert_eq!(props["stopOnEntry"]["type"], "boolean");
+    }
+
+    #[test]
+    fn schema_dart_flutter_property_types() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        let props = &schema["properties"];
+        assert_eq!(props["program"]["type"], "string");
+        assert_eq!(props["cwd"]["type"], "string");
+        assert_eq!(props["args"]["type"], "array");
+        assert_eq!(props["env"]["type"], "object");
+        assert_eq!(props["vmServiceUri"]["type"], "string");
+        assert_eq!(props["testMode"]["type"], "boolean");
+        assert_eq!(props["flutterSdkPath"]["type"], "string");
+        assert_eq!(props["stopOnEntry"]["type"], "boolean");
+    }
+
+    #[test]
+    fn schema_dart_cli_has_dart_sdk_path_not_flutter() {
+        let schema = parse_schema(DART_CLI_SCHEMA);
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("dartSdkPath"));
+        assert!(!props.contains_key("flutterSdkPath"));
+    }
+
+    #[test]
+    fn schema_dart_flutter_has_flutter_sdk_path_not_dart() {
+        let schema = parse_schema(DART_FLUTTER_SCHEMA);
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("flutterSdkPath"));
+        assert!(!props.contains_key("dartSdkPath"));
+    }
 }

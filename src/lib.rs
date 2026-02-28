@@ -87,6 +87,45 @@ fn classify_target(
     }
 }
 
+/// Build a `DebugAdapterBinary` from a resolved binary path, target kind, and config.
+///
+/// This function is independent of `Worktree`, making it testable in unit tests.
+fn build_debug_adapter_binary(
+    command: String,
+    target: TargetKind,
+    config: &serde_json::Value,
+    raw_config: String,
+) -> DebugAdapterBinary {
+    let mut arguments = vec![target.adapter_subcommand().to_string()];
+    if target.is_test() {
+        arguments.push("--test".to_string());
+    }
+
+    DebugAdapterBinary {
+        command: Some(command),
+        arguments,
+        envs: collect_env(config),
+        cwd: config
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        connection: None,
+        request_args: StartDebuggingRequestArguments {
+            configuration: raw_config,
+            request: target.request_kind(),
+        },
+    }
+}
+
+/// Extract the configured SDK binary path from config, if present and non-empty.
+fn sdk_path_override(config: &serde_json::Value, key: &str) -> Option<String> {
+    config
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 struct DartDapExtension;
 
 impl zed::Extension for DartDapExtension {
@@ -115,25 +154,12 @@ impl zed::Extension for DartDapExtension {
             }
         };
 
-        let mut arguments = vec![target.adapter_subcommand().to_string()];
-        if target.is_test() {
-            arguments.push("--test".to_string());
-        }
-
-        Ok(DebugAdapterBinary {
-            command: Some(command),
-            arguments,
-            envs: collect_env(&config_value),
-            cwd: config_value
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            connection: None,
-            request_args: StartDebuggingRequestArguments {
-                configuration: config.config,
-                request: target.request_kind(),
-            },
-        })
+        Ok(build_debug_adapter_binary(
+            command,
+            target,
+            &config_value,
+            config.config,
+        ))
     }
 
     fn dap_request_kind(
@@ -214,10 +240,8 @@ fn resolve_dart_binary(
     config: &serde_json::Value,
     worktree: &Worktree,
 ) -> Result<String, String> {
-    if let Some(path) = config.get("dartSdkPath").and_then(|v| v.as_str()) {
-        if !path.is_empty() {
-            return Ok(path.to_string());
-        }
+    if let Some(path) = sdk_path_override(config, "dartSdkPath") {
+        return Ok(path);
     }
     worktree
         .which("dart")
@@ -229,10 +253,8 @@ fn resolve_flutter_binary(
     config: &serde_json::Value,
     worktree: &Worktree,
 ) -> Result<String, String> {
-    if let Some(path) = config.get("flutterSdkPath").and_then(|v| v.as_str()) {
-        if !path.is_empty() {
-            return Ok(path.to_string());
-        }
+    if let Some(path) = sdk_path_override(config, "flutterSdkPath") {
+        return Ok(path);
     }
     worktree
         .which("flutter")
@@ -877,5 +899,152 @@ mod tests {
         let props = schema["properties"].as_object().unwrap();
         assert!(props.contains_key("flutterSdkPath"));
         assert!(!props.contains_key("dartSdkPath"));
+    }
+
+    // --- sdk_path_override tests ---
+
+    #[test]
+    fn sdk_path_override_returns_configured_path() {
+        let config = serde_json::json!({"dartSdkPath": "/usr/local/dart/bin/dart"});
+        assert_eq!(
+            sdk_path_override(&config, "dartSdkPath"),
+            Some("/usr/local/dart/bin/dart".to_string())
+        );
+    }
+
+    #[test]
+    fn sdk_path_override_returns_none_for_empty() {
+        let config = serde_json::json!({"dartSdkPath": ""});
+        assert_eq!(sdk_path_override(&config, "dartSdkPath"), None);
+    }
+
+    #[test]
+    fn sdk_path_override_returns_none_for_missing() {
+        let config = serde_json::json!({"program": "main.dart"});
+        assert_eq!(sdk_path_override(&config, "dartSdkPath"), None);
+    }
+
+    #[test]
+    fn sdk_path_override_returns_none_for_non_string() {
+        let config = serde_json::json!({"dartSdkPath": 42});
+        assert_eq!(sdk_path_override(&config, "dartSdkPath"), None);
+    }
+
+    #[test]
+    fn sdk_path_override_flutter() {
+        let config = serde_json::json!({"flutterSdkPath": "/opt/flutter/bin/flutter"});
+        assert_eq!(
+            sdk_path_override(&config, "flutterSdkPath"),
+            Some("/opt/flutter/bin/flutter".to_string())
+        );
+    }
+
+    // --- build_debug_adapter_binary descriptor snapshot tests ---
+
+    /// Helper to build a descriptor for a given target kind with standard test config.
+    fn make_descriptor(target: TargetKind) -> DebugAdapterBinary {
+        let config = serde_json::json!({
+            "request": if target.request_kind() == StartDebuggingRequestArgumentsRequest::Launch {
+                "launch"
+            } else {
+                "attach"
+            },
+            "program": "bin/main.dart",
+            "cwd": "/workspace/my_app",
+            "env": {"DART_VM_OPTIONS": "--enable-asserts"},
+            "testMode": target.is_test(),
+        });
+        let raw = config.to_string();
+        build_debug_adapter_binary("/usr/bin/dart".to_string(), target, &config, raw)
+    }
+
+    #[test]
+    fn descriptor_dart_launch() {
+        let bin = make_descriptor(TargetKind::DartLaunch);
+        assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
+        assert_eq!(bin.arguments, vec!["debug_adapter"]);
+        assert_eq!(bin.cwd, Some("/workspace/my_app".to_string()));
+        assert_eq!(bin.envs, vec![("DART_VM_OPTIONS".to_string(), "--enable-asserts".to_string())]);
+        assert!(bin.connection.is_none());
+        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Launch);
+    }
+
+    #[test]
+    fn descriptor_dart_attach() {
+        let bin = make_descriptor(TargetKind::DartAttach);
+        assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
+        assert_eq!(bin.arguments, vec!["debug_adapter"]);
+        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Attach);
+    }
+
+    #[test]
+    fn descriptor_dart_test_launch() {
+        let bin = make_descriptor(TargetKind::DartTestLaunch);
+        assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
+        assert_eq!(bin.arguments, vec!["debug_adapter", "--test"]);
+        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Launch);
+    }
+
+    #[test]
+    fn descriptor_flutter_launch() {
+        let bin = make_descriptor(TargetKind::FlutterLaunch);
+        assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
+        assert_eq!(bin.arguments, vec!["debug-adapter"]);
+        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Launch);
+    }
+
+    #[test]
+    fn descriptor_flutter_attach() {
+        let bin = make_descriptor(TargetKind::FlutterAttach);
+        assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
+        assert_eq!(bin.arguments, vec!["debug-adapter"]);
+        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Attach);
+    }
+
+    #[test]
+    fn descriptor_flutter_test_launch() {
+        let bin = make_descriptor(TargetKind::FlutterTestLaunch);
+        assert_eq!(bin.command, Some("/usr/bin/dart".to_string()));
+        assert_eq!(bin.arguments, vec!["debug-adapter", "--test"]);
+        assert_eq!(bin.request_args.request, StartDebuggingRequestArgumentsRequest::Launch);
+    }
+
+    #[test]
+    fn descriptor_preserves_raw_config_in_request_args() {
+        let config = serde_json::json!({"request": "launch", "program": "main.dart"});
+        let raw = config.to_string();
+        let bin = build_debug_adapter_binary(
+            "dart".to_string(),
+            TargetKind::DartLaunch,
+            &config,
+            raw.clone(),
+        );
+        assert_eq!(bin.request_args.configuration, raw);
+    }
+
+    #[test]
+    fn descriptor_no_cwd_when_absent() {
+        let config = serde_json::json!({"request": "launch", "program": "main.dart"});
+        let raw = config.to_string();
+        let bin = build_debug_adapter_binary(
+            "dart".to_string(),
+            TargetKind::DartLaunch,
+            &config,
+            raw,
+        );
+        assert!(bin.cwd.is_none());
+    }
+
+    #[test]
+    fn descriptor_empty_env_when_absent() {
+        let config = serde_json::json!({"request": "launch", "program": "main.dart"});
+        let raw = config.to_string();
+        let bin = build_debug_adapter_binary(
+            "dart".to_string(),
+            TargetKind::DartLaunch,
+            &config,
+            raw,
+        );
+        assert!(bin.envs.is_empty());
     }
 }

@@ -148,15 +148,17 @@ impl zed::Extension for DartDapExtension {
         &mut self,
         config: DebugConfig,
     ) -> Result<DebugScenario, String> {
-        let (adapter, scenario_config) = match &config.request {
-            DebugRequest::Launch(launch) => {
-                let adapter = if config.adapter == ADAPTER_DART_FLUTTER {
-                    ADAPTER_DART_FLUTTER
-                } else {
-                    ADAPTER_DART_CLI
-                };
+        let adapter = if config.adapter == ADAPTER_DART_FLUTTER {
+            ADAPTER_DART_FLUTTER
+        } else {
+            ADAPTER_DART_CLI
+        };
 
-                let cfg = serde_json::json!({
+        let scenario_config = match &config.request {
+            DebugRequest::Launch(launch) => {
+                let test_mode = looks_like_test(&launch.program);
+
+                serde_json::json!({
                     "request": "launch",
                     "program": launch.program,
                     "args": launch.args,
@@ -164,29 +166,28 @@ impl zed::Extension for DartDapExtension {
                     "env": launch.envs.iter()
                         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
                         .collect::<serde_json::Map<String, serde_json::Value>>(),
+                    "testMode": test_mode,
+                    "stopOnEntry": config.stop_on_entry.unwrap_or(false),
+                })
+            }
+            DebugRequest::Attach(attach) => {
+                let mut cfg = serde_json::json!({
+                    "request": "attach",
+                    "vmServiceUri": "",
                     "stopOnEntry": config.stop_on_entry.unwrap_or(false),
                 });
 
-                (adapter.to_string(), cfg)
-            }
-            DebugRequest::Attach(_attach) => {
-                let adapter = if config.adapter == ADAPTER_DART_FLUTTER {
-                    ADAPTER_DART_FLUTTER
-                } else {
-                    ADAPTER_DART_CLI
-                };
+                if let Some(pid) = attach.process_id {
+                    cfg["processId"] = serde_json::Value::Number(pid.into());
+                }
 
-                let cfg = serde_json::json!({
-                    "request": "attach",
-                });
-
-                (adapter.to_string(), cfg)
+                cfg
             }
         };
 
         Ok(DebugScenario {
             label: config.label,
-            adapter,
+            adapter: adapter.to_string(),
             build: None,
             config: scenario_config.to_string(),
             tcp_connection: None,
@@ -238,6 +239,19 @@ fn resolve_flutter_binary(
         .ok_or_else(|| "Could not find 'flutter' on PATH. Ensure the Flutter SDK is installed and available in your shell environment.".to_string())
 }
 
+/// Heuristic: does this program path look like a test file?
+fn looks_like_test(program: &str) -> bool {
+    program.ends_with("_test.dart")
+        || program.starts_with("test/")
+        || program.starts_with("test\\")
+        || program.contains("/test/")
+        || program.contains("\\test\\")
+        || program.starts_with("integration_test/")
+        || program.starts_with("integration_test\\")
+        || program.contains("/integration_test/")
+        || program.contains("\\integration_test\\")
+}
+
 /// Collect environment variables from the config's "env" object.
 fn collect_env(config: &serde_json::Value) -> Vec<(String, String)> {
     config
@@ -256,6 +270,7 @@ zed::register_extension!(DartDapExtension);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zed_extension_api::Extension;
 
     // --- resolve_request_kind tests ---
 
@@ -452,5 +467,181 @@ mod tests {
     fn collect_env_null_field() {
         let config = serde_json::json!({"env": null});
         assert!(collect_env(&config).is_empty());
+    }
+
+    // --- looks_like_test tests ---
+
+    #[test]
+    fn looks_like_test_suffix() {
+        assert!(looks_like_test("widget_test.dart"));
+        assert!(looks_like_test("my_app_test.dart"));
+    }
+
+    #[test]
+    fn looks_like_test_in_test_dir() {
+        assert!(looks_like_test("test/widget_test.dart"));
+        assert!(looks_like_test("test/unit/parser_test.dart"));
+    }
+
+    #[test]
+    fn looks_like_test_integration() {
+        assert!(looks_like_test("integration_test/app_test.dart"));
+        assert!(looks_like_test("src/integration_test/smoke_test.dart"));
+    }
+
+    #[test]
+    fn looks_like_test_nested_test_dir() {
+        assert!(looks_like_test("packages/core/test/utils_test.dart"));
+    }
+
+    #[test]
+    fn looks_like_test_negative() {
+        assert!(!looks_like_test("lib/main.dart"));
+        assert!(!looks_like_test("bin/server.dart"));
+        assert!(!looks_like_test("lib/testing_utils.dart"));
+        assert!(!looks_like_test("lib/contest.dart"));
+    }
+
+    // --- dap_config_to_scenario tests ---
+
+    /// Helper to build a DebugConfig with a launch request.
+    fn make_launch_config(adapter: &str, program: &str) -> DebugConfig {
+        DebugConfig {
+            label: "Test".to_string(),
+            adapter: adapter.to_string(),
+            request: DebugRequest::Launch(zed::LaunchRequest {
+                program: program.to_string(),
+                cwd: Some("/workspace".to_string()),
+                args: vec!["--verbose".to_string()],
+                envs: vec![("DART_VM_OPTIONS".to_string(), "--enable-asserts".to_string())],
+            }),
+            stop_on_entry: Some(true),
+        }
+    }
+
+    /// Helper to build a DebugConfig with an attach request.
+    fn make_attach_config(adapter: &str, process_id: Option<u32>) -> DebugConfig {
+        DebugConfig {
+            label: "Attach".to_string(),
+            adapter: adapter.to_string(),
+            request: DebugRequest::Attach(zed::AttachRequest { process_id }),
+            stop_on_entry: None,
+        }
+    }
+
+    #[test]
+    fn scenario_launch_dart_non_test() {
+        let mut ext = DartDapExtension;
+        let config = make_launch_config(ADAPTER_DART_CLI, "bin/main.dart");
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        assert_eq!(scenario.adapter, ADAPTER_DART_CLI);
+        let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
+        assert_eq!(cfg["request"], "launch");
+        assert_eq!(cfg["program"], "bin/main.dart");
+        assert_eq!(cfg["testMode"], false);
+        assert_eq!(cfg["stopOnEntry"], true);
+        assert_eq!(cfg["cwd"], "/workspace");
+        assert_eq!(cfg["args"], serde_json::json!(["--verbose"]));
+        assert_eq!(cfg["env"]["DART_VM_OPTIONS"], "--enable-asserts");
+    }
+
+    #[test]
+    fn scenario_launch_dart_test_file() {
+        let mut ext = DartDapExtension;
+        let config = make_launch_config(ADAPTER_DART_CLI, "test/widget_test.dart");
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        assert_eq!(scenario.adapter, ADAPTER_DART_CLI);
+        let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
+        assert_eq!(cfg["testMode"], true);
+    }
+
+    #[test]
+    fn scenario_launch_flutter_non_test() {
+        let mut ext = DartDapExtension;
+        let config = make_launch_config(ADAPTER_DART_FLUTTER, "lib/main.dart");
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        assert_eq!(scenario.adapter, ADAPTER_DART_FLUTTER);
+        let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
+        assert_eq!(cfg["testMode"], false);
+    }
+
+    #[test]
+    fn scenario_launch_flutter_test_file() {
+        let mut ext = DartDapExtension;
+        let config = make_launch_config(ADAPTER_DART_FLUTTER, "integration_test/app_test.dart");
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        assert_eq!(scenario.adapter, ADAPTER_DART_FLUTTER);
+        let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
+        assert_eq!(cfg["testMode"], true);
+    }
+
+    #[test]
+    fn scenario_launch_defaults_to_dart_cli() {
+        let mut ext = DartDapExtension;
+        let config = make_launch_config("SomeOther", "main.dart");
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        assert_eq!(scenario.adapter, ADAPTER_DART_CLI);
+    }
+
+    #[test]
+    fn scenario_attach_includes_vm_service_placeholder() {
+        let mut ext = DartDapExtension;
+        let config = make_attach_config(ADAPTER_DART_CLI, None);
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        assert_eq!(scenario.adapter, ADAPTER_DART_CLI);
+        let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
+        assert_eq!(cfg["request"], "attach");
+        assert_eq!(cfg["vmServiceUri"], "");
+        assert_eq!(cfg["stopOnEntry"], false);
+        assert!(cfg.get("processId").is_none());
+    }
+
+    #[test]
+    fn scenario_attach_with_process_id() {
+        let mut ext = DartDapExtension;
+        let config = make_attach_config(ADAPTER_DART_CLI, Some(12345));
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
+        assert_eq!(cfg["processId"], 12345);
+    }
+
+    #[test]
+    fn scenario_attach_flutter() {
+        let mut ext = DartDapExtension;
+        let config = make_attach_config(ADAPTER_DART_FLUTTER, None);
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        assert_eq!(scenario.adapter, ADAPTER_DART_FLUTTER);
+        let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
+        assert_eq!(cfg["request"], "attach");
+        assert_eq!(cfg["vmServiceUri"], "");
+    }
+
+    #[test]
+    fn scenario_attach_stop_on_entry() {
+        let mut ext = DartDapExtension;
+        let mut config = make_attach_config(ADAPTER_DART_CLI, None);
+        config.stop_on_entry = Some(true);
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
+        assert_eq!(cfg["stopOnEntry"], true);
+    }
+
+    #[test]
+    fn scenario_preserves_label() {
+        let mut ext = DartDapExtension;
+        let mut config = make_launch_config(ADAPTER_DART_CLI, "main.dart");
+        config.label = "My Custom Label".to_string();
+        let scenario = ext.dap_config_to_scenario(config).unwrap();
+
+        assert_eq!(scenario.label, "My Custom Label");
     }
 }

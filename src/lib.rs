@@ -4,10 +4,10 @@ use zed_extension_api::{
 };
 
 /// Adapter name for Dart CLI debugging (launch, attach, test).
-const ADAPTER_DART_CLI: &str = "DartCLI";
+const ADAPTER_DART_CLI: &str = "FlutterCLI";
 
 /// Adapter name for Flutter debugging (launch, attach, test).
-const ADAPTER_DART_FLUTTER: &str = "DartFlutter";
+const ADAPTER_DART_FLUTTER: &str = "Flutter";
 
 /// Normalized target classification combining adapter family, request kind, and test mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,14 @@ impl TargetKind {
         matches!(
             self,
             TargetKind::DartTestLaunch | TargetKind::FlutterTestLaunch
+        )
+    }
+
+    /// Whether this is a Flutter family target (needs hot reload proxy).
+    fn is_flutter_family(&self) -> bool {
+        matches!(
+            self,
+            TargetKind::FlutterLaunch | TargetKind::FlutterAttach | TargetKind::FlutterTestLaunch
         )
     }
 
@@ -127,22 +135,18 @@ fn validate_config(target: TargetKind, config: &serde_json::Value) -> Result<(),
             }
         }
         StartDebuggingRequestArgumentsRequest::Attach => {
-            match config.get("vmServiceUri").and_then(|v| v.as_str()) {
-                None => {
-                    return Err(format!(
-                        "{}: Attach configuration requires a 'vmServiceUri' field. \
-                         Set it to the Dart VM service URI (e.g., \"ws://127.0.0.1:8181/abcd=/ws\").",
-                        target.display_name()
-                    ));
-                }
-                Some("") => {
-                    return Err(format!(
-                        "{}: 'vmServiceUri' must not be empty. \
-                         Set it to the Dart VM service URI (e.g., \"ws://127.0.0.1:8181/abcd=/ws\").",
-                        target.display_name()
-                    ));
-                }
-                _ => {}
+            let has_vm_service_uri = matches!(
+                config.get("vmServiceUri").and_then(|v| v.as_str()),
+                Some(s) if !s.is_empty()
+            );
+            let has_process_id = config.get("processId").and_then(|v| v.as_u64()).is_some();
+
+            if !has_vm_service_uri && !has_process_id {
+                return Err(format!(
+                    "{}: Attach configuration requires either a 'vmServiceUri' \
+                     (e.g., \"ws://127.0.0.1:8181/abcd=/ws\") or a 'processId'.",
+                    target.display_name()
+                ));
             }
         }
     }
@@ -177,6 +181,35 @@ fn build_debug_adapter_binary(
     }
 }
 
+/// Build a `DebugAdapterBinary` that runs through the DAP proxy.
+///
+/// The proxy binary becomes the command, and the original SDK binary + adapter args
+/// are passed as arguments to the proxy.
+fn build_proxied_debug_adapter_binary(
+    proxy_command: String,
+    sdk_binary: String,
+    target: TargetKind,
+    config: &serde_json::Value,
+    raw_config: String,
+) -> DebugAdapterBinary {
+    let mut arguments = vec![sdk_binary, target.adapter_subcommand().to_string()];
+    if target.is_test() {
+        arguments.push("--test".to_string());
+    }
+
+    DebugAdapterBinary {
+        command: Some(proxy_command),
+        arguments,
+        envs: collect_env(config),
+        cwd: config.get("cwd").and_then(|v| v.as_str()).map(String::from),
+        connection: None,
+        request_args: StartDebuggingRequestArguments {
+            configuration: raw_config,
+            request: target.request_kind(),
+        },
+    }
+}
+
 /// Extract the configured SDK binary path from config, if present and non-empty.
 fn sdk_path_override(config: &serde_json::Value, key: &str) -> Option<String> {
     config
@@ -184,6 +217,89 @@ fn sdk_path_override(config: &serde_json::Value, key: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+/// GitHub repository for the dap-proxy binary releases.
+const PROXY_REPO: &str = "dididi/zed-flutter-dap";
+
+/// Name of the proxy binary.
+const PROXY_BINARY: &str = "dap-proxy";
+
+/// Determine the expected asset name for the current platform.
+fn proxy_asset_name() -> Result<String, String> {
+    let (os, arch) = zed::current_platform();
+    let target = match (os, arch) {
+        (zed::Os::Mac, zed::Architecture::Aarch64) => "aarch64-apple-darwin",
+        (zed::Os::Mac, zed::Architecture::X8664) => "x86_64-apple-darwin",
+        (zed::Os::Linux, zed::Architecture::Aarch64) => "aarch64-unknown-linux-gnu",
+        (zed::Os::Linux, zed::Architecture::X8664) => "x86_64-unknown-linux-gnu",
+        (os, arch) => {
+            return Err(format!(
+                "Unsupported platform for dap-proxy: {os:?}/{arch:?}"
+            ))
+        }
+    };
+    Ok(format!("dap-proxy-{target}.tar.gz"))
+}
+
+/// Ensure the dap-proxy binary is available, downloading it if necessary.
+///
+/// Returns the absolute path to the proxy binary.
+fn ensure_proxy_binary() -> Result<String, String> {
+    let binary_path = format!("{PROXY_BINARY}/{PROXY_BINARY}");
+
+    // Check if already downloaded
+    if std::fs::metadata(&binary_path).is_ok() {
+        // Convert to absolute path so Zed can find it regardless of cwd
+        let abs_path = std::env::current_dir()
+            .map_err(|e| format!("Failed to get extension working directory: {e}"))?
+            .join(&binary_path);
+        return Ok(abs_path.to_string_lossy().into_owned());
+    }
+
+    let asset_name = proxy_asset_name()?;
+
+    let release = zed::latest_github_release(
+        PROXY_REPO,
+        zed::GithubReleaseOptions {
+            require_assets: true,
+            pre_release: false,
+        },
+    )
+    .map_err(|e| format!("Failed to fetch dap-proxy release: {e}"))?;
+
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == asset_name)
+        .ok_or_else(|| {
+            format!(
+                "No dap-proxy asset found for this platform (expected {asset_name}). \
+                 Available assets: {}",
+                release
+                    .assets
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+
+    // Download and extract
+    zed::download_file(
+        &asset.download_url,
+        PROXY_BINARY,
+        zed::DownloadedFileType::GzipTar,
+    )
+    .map_err(|e| format!("Failed to download dap-proxy: {e}"))?;
+
+    zed::make_file_executable(&binary_path)
+        .map_err(|e| format!("Failed to make dap-proxy executable: {e}"))?;
+
+    let abs_path = std::env::current_dir()
+        .map_err(|e| format!("Failed to get extension working directory: {e}"))?
+        .join(&binary_path);
+    Ok(abs_path.to_string_lossy().into_owned())
 }
 
 struct DartDapExtension;
@@ -210,7 +326,7 @@ impl zed::Extension for DartDapExtension {
         let target = classify_target(&adapter_name, &config_value)?;
         validate_config(target, &config_value)?;
 
-        let command = match target {
+        let sdk_binary = match target {
             TargetKind::DartLaunch | TargetKind::DartAttach | TargetKind::DartTestLaunch => {
                 resolve_dart_binary(&config_value, worktree)?
             }
@@ -219,8 +335,20 @@ impl zed::Extension for DartDapExtension {
             | TargetKind::FlutterTestLaunch => resolve_flutter_binary(&config_value, worktree)?,
         };
 
+        // For Flutter targets, wrap through the DAP proxy for hot reload support
+        if target.is_flutter_family() {
+            let proxy_path = ensure_proxy_binary()?;
+            return Ok(build_proxied_debug_adapter_binary(
+                proxy_path,
+                sdk_binary,
+                target,
+                &config_value,
+                config.config,
+            ));
+        }
+
         Ok(build_debug_adapter_binary(
-            command,
+            sdk_binary,
             target,
             &config_value,
             config.config,
@@ -261,7 +389,6 @@ impl zed::Extension for DartDapExtension {
             DebugRequest::Attach(attach) => {
                 let mut cfg = serde_json::json!({
                     "request": "attach",
-                    "vmServiceUri": "",
                     "stopOnEntry": config.stop_on_entry.unwrap_or(false),
                 });
 
@@ -413,7 +540,7 @@ mod tests {
     fn classify_dart_launch() {
         let config = serde_json::json!({"request": "launch"});
         assert_eq!(
-            classify_target("DartCLI", &config).unwrap(),
+            classify_target(ADAPTER_DART_CLI, &config).unwrap(),
             TargetKind::DartLaunch
         );
     }
@@ -422,7 +549,7 @@ mod tests {
     fn classify_dart_attach() {
         let config = serde_json::json!({"request": "attach"});
         assert_eq!(
-            classify_target("DartCLI", &config).unwrap(),
+            classify_target(ADAPTER_DART_CLI, &config).unwrap(),
             TargetKind::DartAttach
         );
     }
@@ -431,7 +558,7 @@ mod tests {
     fn classify_dart_test_launch() {
         let config = serde_json::json!({"request": "launch", "testMode": true});
         assert_eq!(
-            classify_target("DartCLI", &config).unwrap(),
+            classify_target(ADAPTER_DART_CLI, &config).unwrap(),
             TargetKind::DartTestLaunch
         );
     }
@@ -440,7 +567,7 @@ mod tests {
     fn classify_dart_test_false_is_normal_launch() {
         let config = serde_json::json!({"request": "launch", "testMode": false});
         assert_eq!(
-            classify_target("DartCLI", &config).unwrap(),
+            classify_target(ADAPTER_DART_CLI, &config).unwrap(),
             TargetKind::DartLaunch
         );
     }
@@ -448,7 +575,7 @@ mod tests {
     #[test]
     fn classify_dart_attach_test_mode_rejected() {
         let config = serde_json::json!({"request": "attach", "testMode": true});
-        let err = classify_target("DartCLI", &config).unwrap_err();
+        let err = classify_target(ADAPTER_DART_CLI, &config).unwrap_err();
         assert!(err.contains("Test mode is not supported"));
     }
 
@@ -456,7 +583,7 @@ mod tests {
     fn classify_flutter_launch() {
         let config = serde_json::json!({"request": "launch"});
         assert_eq!(
-            classify_target("DartFlutter", &config).unwrap(),
+            classify_target(ADAPTER_DART_FLUTTER, &config).unwrap(),
             TargetKind::FlutterLaunch
         );
     }
@@ -465,7 +592,7 @@ mod tests {
     fn classify_flutter_attach() {
         let config = serde_json::json!({"request": "attach"});
         assert_eq!(
-            classify_target("DartFlutter", &config).unwrap(),
+            classify_target(ADAPTER_DART_FLUTTER, &config).unwrap(),
             TargetKind::FlutterAttach
         );
     }
@@ -474,7 +601,7 @@ mod tests {
     fn classify_flutter_test_launch() {
         let config = serde_json::json!({"request": "launch", "testMode": true});
         assert_eq!(
-            classify_target("DartFlutter", &config).unwrap(),
+            classify_target(ADAPTER_DART_FLUTTER, &config).unwrap(),
             TargetKind::FlutterTestLaunch
         );
     }
@@ -482,7 +609,7 @@ mod tests {
     #[test]
     fn classify_flutter_attach_test_mode_rejected() {
         let config = serde_json::json!({"request": "attach", "testMode": true});
-        let err = classify_target("DartFlutter", &config).unwrap_err();
+        let err = classify_target(ADAPTER_DART_FLUTTER, &config).unwrap_err();
         assert!(err.contains("Test mode is not supported"));
     }
 
@@ -496,14 +623,14 @@ mod tests {
     #[test]
     fn classify_invalid_request() {
         let config = serde_json::json!({"request": "debug"});
-        let err = classify_target("DartCLI", &config).unwrap_err();
+        let err = classify_target(ADAPTER_DART_CLI, &config).unwrap_err();
         assert!(err.contains("Invalid 'request' value"));
     }
 
     #[test]
     fn classify_missing_request() {
         let config = serde_json::json!({"program": "main.dart"});
-        let err = classify_target("DartCLI", &config).unwrap_err();
+        let err = classify_target(ADAPTER_DART_CLI, &config).unwrap_err();
         assert!(err.contains("Missing"));
     }
 
@@ -539,6 +666,16 @@ mod tests {
         assert!(!TargetKind::FlutterLaunch.is_test());
         assert!(!TargetKind::FlutterAttach.is_test());
         assert!(TargetKind::FlutterTestLaunch.is_test());
+    }
+
+    #[test]
+    fn target_kind_is_flutter_family() {
+        assert!(!TargetKind::DartLaunch.is_flutter_family());
+        assert!(!TargetKind::DartAttach.is_flutter_family());
+        assert!(!TargetKind::DartTestLaunch.is_flutter_family());
+        assert!(TargetKind::FlutterLaunch.is_flutter_family());
+        assert!(TargetKind::FlutterAttach.is_flutter_family());
+        assert!(TargetKind::FlutterTestLaunch.is_flutter_family());
     }
 
     #[test]
@@ -733,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn scenario_attach_includes_vm_service_placeholder() {
+    fn scenario_attach_omits_vm_service_uri_when_no_process_id() {
         let mut ext = DartDapExtension;
         let config = make_attach_config(ADAPTER_DART_CLI, None);
         let scenario = ext.dap_config_to_scenario(config).unwrap();
@@ -741,7 +878,7 @@ mod tests {
         assert_eq!(scenario.adapter, ADAPTER_DART_CLI);
         let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
         assert_eq!(cfg["request"], "attach");
-        assert_eq!(cfg["vmServiceUri"], "");
+        assert!(cfg.get("vmServiceUri").is_none());
         assert_eq!(cfg["stopOnEntry"], false);
         assert!(cfg.get("processId").is_none());
     }
@@ -765,7 +902,7 @@ mod tests {
         assert_eq!(scenario.adapter, ADAPTER_DART_FLUTTER);
         let cfg: serde_json::Value = serde_json::from_str(&scenario.config).unwrap();
         assert_eq!(cfg["request"], "attach");
-        assert_eq!(cfg["vmServiceUri"], "");
+        assert!(cfg.get("vmServiceUri").is_none());
     }
 
     #[test]
@@ -791,8 +928,8 @@ mod tests {
 
     // --- Schema validation tests ---
 
-    const DART_CLI_SCHEMA: &str = include_str!("../debug_adapter_schemas/DartCLI.json");
-    const DART_FLUTTER_SCHEMA: &str = include_str!("../debug_adapter_schemas/DartFlutter.json");
+    const DART_CLI_SCHEMA: &str = include_str!("../debug_adapter_schemas/FlutterCLI.json");
+    const DART_FLUTTER_SCHEMA: &str = include_str!("../debug_adapter_schemas/Flutter.json");
 
     /// Helper: parse a schema and return its Value.
     fn parse_schema(raw: &str) -> serde_json::Value {
@@ -1243,12 +1380,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_attach_empty_vm_service_uri() {
+    fn validate_attach_empty_vm_service_uri_with_process_id_is_ok() {
+        let config = serde_json::json!({"request": "attach", "vmServiceUri": "", "processId": 1234});
+        assert!(validate_config(TargetKind::DartAttach, &config).is_ok());
+    }
+
+    #[test]
+    fn validate_attach_empty_vm_service_uri_without_process_id_fails() {
         let config = serde_json::json!({"request": "attach", "vmServiceUri": ""});
         let err = validate_config(TargetKind::DartAttach, &config).unwrap_err();
         assert!(
-            err.contains("must not be empty"),
-            "error should say empty: {err}"
+            err.contains("vmServiceUri"),
+            "error should mention vmServiceUri: {err}"
+        );
+        assert!(
+            err.contains("processId"),
+            "error should mention processId: {err}"
         );
     }
 
@@ -1290,6 +1437,12 @@ mod tests {
     }
 
     #[test]
+    fn validate_attach_with_process_id_only_is_ok() {
+        let config = serde_json::json!({"request": "attach", "processId": 5678});
+        assert!(validate_config(TargetKind::DartAttach, &config).is_ok());
+    }
+
+    #[test]
     fn validate_test_launch_skips_program_check() {
         // Test mode doesn't require 'program' — tests are discovered automatically
         let config = serde_json::json!({"request": "launch", "testMode": true});
@@ -1312,5 +1465,84 @@ mod tests {
         assert_eq!(TargetKind::FlutterLaunch.display_name(), "Flutter launch");
         assert_eq!(TargetKind::FlutterAttach.display_name(), "Flutter attach");
         assert_eq!(TargetKind::FlutterTestLaunch.display_name(), "Flutter test");
+    }
+
+    // --- build_proxied_debug_adapter_binary tests ---
+
+    #[test]
+    fn proxied_descriptor_flutter_launch() {
+        let config = serde_json::json!({
+            "request": "launch",
+            "program": "lib/main.dart",
+            "cwd": "/workspace/app",
+            "env": {"FLUTTER_TEST": "1"},
+        });
+        let raw = config.to_string();
+        let bin = build_proxied_debug_adapter_binary(
+            "dap-proxy/dap-proxy".to_string(),
+            "/usr/bin/flutter".to_string(),
+            TargetKind::FlutterLaunch,
+            &config,
+            raw.clone(),
+        );
+        assert_eq!(bin.command, Some("dap-proxy/dap-proxy".to_string()));
+        assert_eq!(
+            bin.arguments,
+            vec!["/usr/bin/flutter", "debug-adapter"]
+        );
+        assert_eq!(bin.cwd, Some("/workspace/app".to_string()));
+        assert_eq!(
+            bin.envs,
+            vec![("FLUTTER_TEST".to_string(), "1".to_string())]
+        );
+        assert_eq!(
+            bin.request_args.request,
+            StartDebuggingRequestArgumentsRequest::Launch
+        );
+        assert_eq!(bin.request_args.configuration, raw);
+    }
+
+    #[test]
+    fn proxied_descriptor_flutter_test() {
+        let config = serde_json::json!({
+            "request": "launch",
+            "testMode": true,
+        });
+        let raw = config.to_string();
+        let bin = build_proxied_debug_adapter_binary(
+            "dap-proxy/dap-proxy".to_string(),
+            "/usr/bin/flutter".to_string(),
+            TargetKind::FlutterTestLaunch,
+            &config,
+            raw,
+        );
+        assert_eq!(
+            bin.arguments,
+            vec!["/usr/bin/flutter", "debug-adapter", "--test"]
+        );
+    }
+
+    #[test]
+    fn proxied_descriptor_flutter_attach() {
+        let config = serde_json::json!({
+            "request": "attach",
+            "vmServiceUri": "ws://127.0.0.1:8181/ws",
+        });
+        let raw = config.to_string();
+        let bin = build_proxied_debug_adapter_binary(
+            "dap-proxy/dap-proxy".to_string(),
+            "/usr/bin/flutter".to_string(),
+            TargetKind::FlutterAttach,
+            &config,
+            raw,
+        );
+        assert_eq!(
+            bin.arguments,
+            vec!["/usr/bin/flutter", "debug-adapter"]
+        );
+        assert_eq!(
+            bin.request_args.request,
+            StartDebuggingRequestArgumentsRequest::Attach
+        );
     }
 }

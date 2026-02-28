@@ -738,7 +738,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed-dart-dap"
+name = "zed-flutter-dap"
 version = "0.1.0"
 dependencies = [
  "serde",

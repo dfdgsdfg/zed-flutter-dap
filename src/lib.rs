@@ -338,6 +338,13 @@ fn preferred_proxy_binary_path(worktree: &Worktree) -> Result<PathBuf, String> {
         return Ok(proxy_binary_path_under(&root));
     }
 
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(home_from_cwd) = infer_home_from_path(&cwd.to_string_lossy()) {
+            let root = home_from_cwd.join(".local/share/zed-flutter-dap");
+            return Ok(proxy_binary_path_under(&root));
+        }
+    }
+
     let uid = std::env::var("UID")
         .ok()
         .or_else(|| shell_env_var(&shell_env, "UID"));
@@ -366,9 +373,9 @@ fn install_proxy_binary_at(source: &Path, destination: &Path) -> Result<(), Stri
             destination.display()
         )
     })?;
-
-    zed::make_file_executable(&destination.to_string_lossy())
-        .map_err(|e| format!("Failed to make dap-proxy executable: {e}"))?;
+    // `source` has already been marked executable in the extension working
+    // directory. Preserve those mode bits during copy and avoid calling
+    // `make_file_executable` on absolute paths outside the extension sandbox.
 
     Ok(())
 }

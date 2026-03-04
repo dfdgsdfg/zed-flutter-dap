@@ -238,7 +238,8 @@ chmod +x "$PROXY_ROOT/dap-proxy/dap-proxy"
 The extension checks:
 
 1. `$XDG_DATA_HOME/zed-flutter-dap/dap-proxy/dap-proxy` (or `~/.local/share/zed-flutter-dap/...` when `XDG_DATA_HOME` is unset)
-2. GitHub release download (if no local binary exists)
+2. `${TMPDIR:-/tmp}/zed-flutter-dap[-<uid-or-user>]/dap-proxy/dap-proxy` (ephemeral fallback when both `XDG_DATA_HOME` and `HOME` are unavailable)
+3. GitHub release download (if no local binary exists)
 
 ### 2) Start a normal Flutter debug session in Zed
 

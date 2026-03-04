@@ -281,6 +281,20 @@ fn proxy_install_root_from_sources(
     proxy_install_root_from_env(xdg_data_home.as_deref(), home.as_deref())
 }
 
+/// Resolve a temp install root for environments missing XDG/HOME.
+///
+/// Uses a user-scoped directory when UID or USER is available.
+fn proxy_temp_install_root(uid: Option<&str>, user: Option<&str>) -> PathBuf {
+    let base = std::env::temp_dir();
+    if let Some(uid) = uid.filter(|s| !s.is_empty()) {
+        return base.join(format!("zed-flutter-dap-{uid}"));
+    }
+    if let Some(user) = user.filter(|s| !s.is_empty()) {
+        return base.join(format!("zed-flutter-dap-{user}"));
+    }
+    base.join("zed-flutter-dap")
+}
+
 /// Build the full path to the proxy binary under a given root directory.
 fn proxy_binary_path_under(root: &Path) -> PathBuf {
     root.join(PROXY_BINARY).join(PROXY_BINARY)
@@ -296,11 +310,14 @@ fn preferred_proxy_binary_path(worktree: &Worktree) -> Result<PathBuf, String> {
         return Ok(proxy_binary_path_under(&root));
     }
 
-    Err(
-        "Cannot determine proxy install location: neither XDG_DATA_HOME nor HOME is set \
-         (in process env or shell env)."
-            .to_string(),
-    )
+    let uid = std::env::var("UID")
+        .ok()
+        .or_else(|| shell_env_var(&shell_env, "UID"));
+    let user = std::env::var("USER")
+        .ok()
+        .or_else(|| shell_env_var(&shell_env, "USER"));
+    let temp_root = proxy_temp_install_root(uid.as_deref(), user.as_deref());
+    Ok(proxy_binary_path_under(&temp_root))
 }
 
 /// Copy an already downloaded proxy binary to the desired install location.
@@ -328,6 +345,29 @@ fn install_proxy_binary_at(source: &Path, destination: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// Fetch the latest proxy release, preferring stable and falling back to prereleases.
+fn fetch_proxy_release() -> Result<zed::GithubRelease, String> {
+    match zed::latest_github_release(
+        PROXY_REPO,
+        zed::GithubReleaseOptions {
+            require_assets: true,
+            pre_release: false,
+        },
+    ) {
+        Ok(release) => Ok(release),
+        Err(stable_err) => zed::latest_github_release(
+            PROXY_REPO,
+            zed::GithubReleaseOptions {
+                require_assets: true,
+                pre_release: true,
+            },
+        )
+        .map_err(|pre_err| {
+            format!("stable lookup failed: {stable_err}; prerelease lookup failed: {pre_err}")
+        }),
+    }
+}
+
 /// Ensure the dap-proxy binary is available, downloading it if necessary.
 ///
 /// Returns the absolute path to the proxy binary.
@@ -344,14 +384,8 @@ fn ensure_proxy_binary(worktree: &Worktree) -> Result<String, String> {
 
     let asset_name = proxy_asset_name()?;
 
-    let release = zed::latest_github_release(
-        PROXY_REPO,
-        zed::GithubReleaseOptions {
-            require_assets: true,
-            pre_release: false,
-        },
-    )
-    .map_err(|e| format!("Failed to fetch dap-proxy release: {e}"))?;
+    let release =
+        fetch_proxy_release().map_err(|e| format!("Failed to fetch dap-proxy release: {e}"))?;
 
     let asset = release
         .assets
@@ -1336,6 +1370,24 @@ mod tests {
             root,
             PathBuf::from("/tmp/shell-home/.local/share/zed-flutter-dap")
         );
+    }
+
+    #[test]
+    fn proxy_temp_install_root_prefers_uid() {
+        let path = proxy_temp_install_root(Some("501"), Some("dididi"));
+        assert_eq!(path, std::env::temp_dir().join("zed-flutter-dap-501"));
+    }
+
+    #[test]
+    fn proxy_temp_install_root_uses_user_when_uid_missing() {
+        let path = proxy_temp_install_root(None, Some("dididi"));
+        assert_eq!(path, std::env::temp_dir().join("zed-flutter-dap-dididi"));
+    }
+
+    #[test]
+    fn proxy_temp_install_root_uses_generic_name_when_identity_missing() {
+        let path = proxy_temp_install_root(None, None);
+        assert_eq!(path, std::env::temp_dir().join("zed-flutter-dap"));
     }
 
     #[test]

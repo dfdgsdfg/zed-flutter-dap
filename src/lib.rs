@@ -261,22 +261,44 @@ fn proxy_install_root_from_env(xdg_data_home: Option<&str>, home: Option<&str>) 
         .map(|h| PathBuf::from(h).join(".local/share/zed-flutter-dap"))
 }
 
+/// Lookup a key in shell env pairs.
+fn shell_env_var(shell_env: &[(String, String)], key: &str) -> Option<String> {
+    shell_env
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.is_empty())
+}
+
+/// Resolve proxy root from process env first, then shell env.
+fn proxy_install_root_from_sources(
+    process_xdg_data_home: Option<String>,
+    process_home: Option<String>,
+    shell_env: &[(String, String)],
+) -> Option<PathBuf> {
+    let xdg_data_home = process_xdg_data_home.or_else(|| shell_env_var(shell_env, "XDG_DATA_HOME"));
+    let home = process_home.or_else(|| shell_env_var(shell_env, "HOME"));
+    proxy_install_root_from_env(xdg_data_home.as_deref(), home.as_deref())
+}
+
 /// Build the full path to the proxy binary under a given root directory.
 fn proxy_binary_path_under(root: &Path) -> PathBuf {
     root.join(PROXY_BINARY).join(PROXY_BINARY)
 }
 
 /// Compute the preferred absolute proxy binary path.
-fn preferred_proxy_binary_path() -> Result<PathBuf, String> {
+fn preferred_proxy_binary_path(worktree: &Worktree) -> Result<PathBuf, String> {
     let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
     let home = std::env::var("HOME").ok();
+    let shell_env = worktree.shell_env();
 
-    if let Some(root) = proxy_install_root_from_env(xdg_data_home.as_deref(), home.as_deref()) {
+    if let Some(root) = proxy_install_root_from_sources(xdg_data_home, home, &shell_env) {
         return Ok(proxy_binary_path_under(&root));
     }
 
     Err(
-        "Cannot determine proxy install location: neither XDG_DATA_HOME nor HOME is set."
+        "Cannot determine proxy install location: neither XDG_DATA_HOME nor HOME is set \
+         (in process env or shell env)."
             .to_string(),
     )
 }
@@ -309,8 +331,8 @@ fn install_proxy_binary_at(source: &Path, destination: &Path) -> Result<(), Stri
 /// Ensure the dap-proxy binary is available, downloading it if necessary.
 ///
 /// Returns the absolute path to the proxy binary.
-fn ensure_proxy_binary() -> Result<String, String> {
-    let preferred_path = preferred_proxy_binary_path()?;
+fn ensure_proxy_binary(worktree: &Worktree) -> Result<String, String> {
+    let preferred_path = preferred_proxy_binary_path(worktree)?;
     if std::fs::metadata(&preferred_path).is_ok() {
         return Ok(preferred_path.to_string_lossy().into_owned());
     }
@@ -400,7 +422,7 @@ impl zed::Extension for DartDapExtension {
 
         // For Flutter targets, wrap through the DAP proxy for hot reload support
         if target.is_flutter_family() {
-            let proxy_path = ensure_proxy_binary()?;
+            let proxy_path = ensure_proxy_binary(worktree)?;
             return Ok(build_proxied_debug_adapter_binary(
                 proxy_path,
                 sdk_binary,
@@ -1279,6 +1301,41 @@ mod tests {
     #[test]
     fn proxy_install_root_none_when_no_env_available() {
         assert!(proxy_install_root_from_env(None, None).is_none());
+    }
+
+    #[test]
+    fn proxy_install_root_from_sources_uses_process_env_first() {
+        let shell_env = vec![
+            ("XDG_DATA_HOME".to_string(), "/tmp/shell-xdg".to_string()),
+            ("HOME".to_string(), "/tmp/shell-home".to_string()),
+        ];
+        let root = proxy_install_root_from_sources(
+            Some("/tmp/process-xdg".to_string()),
+            Some("/tmp/process-home".to_string()),
+            &shell_env,
+        )
+        .unwrap();
+        assert_eq!(root, PathBuf::from("/tmp/process-xdg/zed-flutter-dap"));
+    }
+
+    #[test]
+    fn proxy_install_root_from_sources_falls_back_to_shell_env() {
+        let shell_env = vec![
+            ("XDG_DATA_HOME".to_string(), "/tmp/shell-xdg".to_string()),
+            ("HOME".to_string(), "/tmp/shell-home".to_string()),
+        ];
+        let root = proxy_install_root_from_sources(None, None, &shell_env).unwrap();
+        assert_eq!(root, PathBuf::from("/tmp/shell-xdg/zed-flutter-dap"));
+    }
+
+    #[test]
+    fn proxy_install_root_from_sources_uses_shell_home_when_no_xdg() {
+        let shell_env = vec![("HOME".to_string(), "/tmp/shell-home".to_string())];
+        let root = proxy_install_root_from_sources(None, None, &shell_env).unwrap();
+        assert_eq!(
+            root,
+            PathBuf::from("/tmp/shell-home/.local/share/zed-flutter-dap")
+        );
     }
 
     #[test]

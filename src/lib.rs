@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use zed_extension_api::{
     self as zed, DebugAdapterBinary, DebugConfig, DebugRequest, DebugScenario, DebugTaskDefinition,
     StartDebuggingRequestArguments, StartDebuggingRequestArgumentsRequest, Worktree,
@@ -220,10 +222,13 @@ fn sdk_path_override(config: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 /// GitHub repository for the dap-proxy binary releases.
-const PROXY_REPO: &str = "dididi/zed-flutter-dap";
+const PROXY_REPO: &str = "dfdgsdfg/zed-flutter-dap";
 
 /// Name of the proxy binary.
 const PROXY_BINARY: &str = "dap-proxy";
+
+/// Temporary download directory used inside the extension working directory.
+const PROXY_DOWNLOAD_DIR: &str = ".dap-proxy-download";
 
 /// Determine the expected asset name for the current platform.
 fn proxy_asset_name() -> Result<String, String> {
@@ -242,20 +247,78 @@ fn proxy_asset_name() -> Result<String, String> {
     Ok(format!("dap-proxy-{target}.tar.gz"))
 }
 
+/// Resolve the preferred proxy installation root from XDG-style environment variables.
+///
+/// Priority:
+/// 1) $XDG_DATA_HOME/zed-flutter-dap
+/// 2) $HOME/.local/share/zed-flutter-dap
+fn proxy_install_root_from_env(xdg_data_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    if let Some(xdg) = xdg_data_home.filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(xdg).join("zed-flutter-dap"));
+    }
+
+    home.filter(|s| !s.is_empty())
+        .map(|h| PathBuf::from(h).join(".local/share/zed-flutter-dap"))
+}
+
+/// Build the full path to the proxy binary under a given root directory.
+fn proxy_binary_path_under(root: &Path) -> PathBuf {
+    root.join(PROXY_BINARY).join(PROXY_BINARY)
+}
+
+/// Compute the preferred absolute proxy binary path.
+fn preferred_proxy_binary_path() -> Result<PathBuf, String> {
+    let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
+    let home = std::env::var("HOME").ok();
+
+    if let Some(root) = proxy_install_root_from_env(xdg_data_home.as_deref(), home.as_deref()) {
+        return Ok(proxy_binary_path_under(&root));
+    }
+
+    Err(
+        "Cannot determine proxy install location: neither XDG_DATA_HOME nor HOME is set."
+            .to_string(),
+    )
+}
+
+/// Copy an already downloaded proxy binary to the desired install location.
+fn install_proxy_binary_at(source: &Path, destination: &Path) -> Result<(), String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "Invalid proxy destination path (no parent): {}",
+            destination.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("Failed to create proxy directory {}: {e}", parent.display()))?;
+
+    std::fs::copy(source, destination).map_err(|e| {
+        format!(
+            "Failed to install dap-proxy from {} to {}: {e}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+
+    zed::make_file_executable(&destination.to_string_lossy())
+        .map_err(|e| format!("Failed to make dap-proxy executable: {e}"))?;
+
+    Ok(())
+}
+
 /// Ensure the dap-proxy binary is available, downloading it if necessary.
 ///
 /// Returns the absolute path to the proxy binary.
 fn ensure_proxy_binary() -> Result<String, String> {
-    let binary_path = format!("{PROXY_BINARY}/{PROXY_BINARY}");
-
-    // Check if already downloaded
-    if std::fs::metadata(&binary_path).is_ok() {
-        // Convert to absolute path so Zed can find it regardless of cwd
-        let abs_path = std::env::current_dir()
-            .map_err(|e| format!("Failed to get extension working directory: {e}"))?
-            .join(&binary_path);
-        return Ok(abs_path.to_string_lossy().into_owned());
+    let preferred_path = preferred_proxy_binary_path()?;
+    if std::fs::metadata(&preferred_path).is_ok() {
+        return Ok(preferred_path.to_string_lossy().into_owned());
     }
+
+    let temp_binary_rel = format!("{PROXY_DOWNLOAD_DIR}/{PROXY_BINARY}");
+    let temp_binary_abs = std::env::current_dir()
+        .map_err(|e| format!("Failed to get extension working directory: {e}"))?
+        .join(&temp_binary_rel);
 
     let asset_name = proxy_asset_name()?;
 
@@ -286,20 +349,20 @@ fn ensure_proxy_binary() -> Result<String, String> {
         })?;
 
     // Download and extract
+    let _ = std::fs::remove_dir_all(PROXY_DOWNLOAD_DIR);
     zed::download_file(
         &asset.download_url,
-        PROXY_BINARY,
+        PROXY_DOWNLOAD_DIR,
         zed::DownloadedFileType::GzipTar,
     )
     .map_err(|e| format!("Failed to download dap-proxy: {e}"))?;
 
-    zed::make_file_executable(&binary_path)
+    zed::make_file_executable(&temp_binary_rel)
         .map_err(|e| format!("Failed to make dap-proxy executable: {e}"))?;
 
-    let abs_path = std::env::current_dir()
-        .map_err(|e| format!("Failed to get extension working directory: {e}"))?
-        .join(&binary_path);
-    Ok(abs_path.to_string_lossy().into_owned())
+    install_proxy_binary_at(&temp_binary_abs, &preferred_path)?;
+    let _ = std::fs::remove_dir_all(PROXY_DOWNLOAD_DIR);
+    Ok(preferred_path.to_string_lossy().into_owned())
 }
 
 struct DartDapExtension;
@@ -1198,6 +1261,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn proxy_install_root_uses_xdg_data_home_first() {
+        let root = proxy_install_root_from_env(Some("/tmp/xdg"), Some("/tmp/home")).unwrap();
+        assert_eq!(root, PathBuf::from("/tmp/xdg/zed-flutter-dap"));
+    }
+
+    #[test]
+    fn proxy_install_root_falls_back_to_home_local_share() {
+        let root = proxy_install_root_from_env(None, Some("/tmp/home")).unwrap();
+        assert_eq!(
+            root,
+            PathBuf::from("/tmp/home/.local/share/zed-flutter-dap")
+        );
+    }
+
+    #[test]
+    fn proxy_install_root_none_when_no_env_available() {
+        assert!(proxy_install_root_from_env(None, None).is_none());
+    }
+
+    #[test]
+    fn proxy_binary_path_under_root() {
+        let path = proxy_binary_path_under(Path::new("/tmp/zed-flutter-dap"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/zed-flutter-dap/dap-proxy/dap-proxy")
+        );
+    }
+
     // --- build_debug_adapter_binary descriptor snapshot tests ---
 
     /// Helper to build a descriptor for a given target kind with standard test config.
@@ -1381,7 +1473,8 @@ mod tests {
 
     #[test]
     fn validate_attach_empty_vm_service_uri_with_process_id_is_ok() {
-        let config = serde_json::json!({"request": "attach", "vmServiceUri": "", "processId": 1234});
+        let config =
+            serde_json::json!({"request": "attach", "vmServiceUri": "", "processId": 1234});
         assert!(validate_config(TargetKind::DartAttach, &config).is_ok());
     }
 
@@ -1486,10 +1579,7 @@ mod tests {
             raw.clone(),
         );
         assert_eq!(bin.command, Some("dap-proxy/dap-proxy".to_string()));
-        assert_eq!(
-            bin.arguments,
-            vec!["/usr/bin/flutter", "debug-adapter"]
-        );
+        assert_eq!(bin.arguments, vec!["/usr/bin/flutter", "debug-adapter"]);
         assert_eq!(bin.cwd, Some("/workspace/app".to_string()));
         assert_eq!(
             bin.envs,
@@ -1536,10 +1626,7 @@ mod tests {
             &config,
             raw,
         );
-        assert_eq!(
-            bin.arguments,
-            vec!["/usr/bin/flutter", "debug-adapter"]
-        );
+        assert_eq!(bin.arguments, vec!["/usr/bin/flutter", "debug-adapter"]);
         assert_eq!(
             bin.request_args.request,
             StartDebuggingRequestArgumentsRequest::Attach

@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "dart": {
+      "type": "stdio",
+      "command": "dart mcp-server --experimental-mcp-server --force-roots-fallback",
+      "env": {},
+      "args": []
+    },
+    "grep": {
+      "type": "sse",
+      "url": "https://mcp.grep.app"
+    },
+    "context7": {
+      "command": "bunx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    },
+    "ck": {
+      "command": "ck",
+      "args": ["--serve"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}

@@ -218,6 +218,51 @@ cd dap-proxy && cargo test
 cd dap-proxy && cargo build --release
 ```
 
+## Run `dap-proxy` Locally
+
+If the extension cannot download `dap-proxy` from GitHub releases (for example, a `404 Not Found`), you can run with a local proxy binary.
+
+### 1) Build and install the local proxy binary
+
+From the repository root:
+
+```bash
+cd dap-proxy
+cargo build --release
+PROXY_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/zed-flutter-dap"
+mkdir -p "$PROXY_ROOT/dap-proxy"
+cp target/release/dap-proxy "$PROXY_ROOT/dap-proxy/dap-proxy"
+chmod +x "$PROXY_ROOT/dap-proxy/dap-proxy"
+```
+
+The extension checks:
+
+1. `$XDG_DATA_HOME/zed-flutter-dap/dap-proxy/dap-proxy` (or `~/.local/share/zed-flutter-dap/...` when `XDG_DATA_HOME` is unset)
+2. GitHub release download (if no local binary exists)
+
+### 2) Start a normal Flutter debug session in Zed
+
+No extra config is needed. If the local proxy binary exists at the XDG path above, Flutter sessions use it automatically.
+
+### 3) (Optional) Run proxy manually
+
+You can also run the proxy directly, wrapping Flutter's adapter command:
+
+```bash
+"${XDG_DATA_HOME:-$HOME/.local/share}/zed-flutter-dap/dap-proxy/dap-proxy" flutter debug-adapter
+```
+
+### 4) Publish release assets for auto-download
+
+Auto-download expects releases in this repo tagged as `dap-proxy-v*` with assets named:
+
+- `dap-proxy-aarch64-apple-darwin.tar.gz`
+- `dap-proxy-x86_64-apple-darwin.tar.gz`
+- `dap-proxy-x86_64-unknown-linux-gnu.tar.gz`
+- `dap-proxy-aarch64-unknown-linux-gnu.tar.gz`
+
+The GitHub Actions workflow creates these assets automatically when you push a `dap-proxy-v*` tag.
+
 ## License
 
 MIT

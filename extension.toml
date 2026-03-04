@@ -1,6 +1,6 @@
 id = "zed-flutter-dap"
 name = "Dart & Flutter Debugger"
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["dididi"]
 description = "Debug Adapter Protocol support for Dart CLI apps, Flutter apps, and tests using official SDK debug adapters"

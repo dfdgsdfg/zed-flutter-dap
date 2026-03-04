@@ -264,6 +264,28 @@ Auto-download expects releases in this repo tagged as `dap-proxy-v*` with assets
 
 The GitHub Actions workflow creates these assets automatically when you push a `dap-proxy-v*` tag.
 
+### 5) Add a task to update local proxy
+
+If you keep a local clone of this extension repo, you can add a Zed task that rebuilds and reinstalls the proxy into XDG storage.
+
+Add to `.zed/tasks.json` (adjust the repo path):
+
+```json
+[
+  {
+    "label": "dap-proxy: update local",
+    "command": "bash",
+    "args": [
+      "-lc",
+      "cd /absolute/path/to/zed-flutter-dap/dap-proxy && cargo build --release && PROXY_ROOT=\"${XDG_DATA_HOME:-$HOME/.local/share}/zed-flutter-dap\" && mkdir -p \"$PROXY_ROOT/dap-proxy\" && cp target/release/dap-proxy \"$PROXY_ROOT/dap-proxy/dap-proxy\" && chmod +x \"$PROXY_ROOT/dap-proxy/dap-proxy\""
+    ],
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]
+```
+
 ## License
 
 MIT

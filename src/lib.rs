@@ -281,6 +281,29 @@ fn proxy_install_root_from_sources(
     proxy_install_root_from_env(xdg_data_home.as_deref(), home.as_deref())
 }
 
+/// Infer a home directory from a worktree path.
+///
+/// Supported forms:
+/// - macOS: `/Users/<name>/...`
+/// - Linux: `/home/<name>/...`
+fn infer_home_from_path(path: &str) -> Option<PathBuf> {
+    let p = Path::new(path);
+    let mut comps = p.components();
+
+    // Expect an absolute path starting with root.
+    if comps.next() != Some(std::path::Component::RootDir) {
+        return None;
+    }
+
+    let top = comps.next()?.as_os_str().to_string_lossy();
+    if top != "Users" && top != "home" {
+        return None;
+    }
+
+    let user = comps.next()?.as_os_str();
+    Some(PathBuf::from("/").join(top.as_ref()).join(user))
+}
+
 /// Resolve a temp install root for environments missing XDG/HOME.
 ///
 /// Uses a user-scoped directory when UID or USER is available.
@@ -307,6 +330,11 @@ fn preferred_proxy_binary_path(worktree: &Worktree) -> Result<PathBuf, String> {
     let shell_env = worktree.shell_env();
 
     if let Some(root) = proxy_install_root_from_sources(xdg_data_home, home, &shell_env) {
+        return Ok(proxy_binary_path_under(&root));
+    }
+
+    if let Some(home_from_worktree) = infer_home_from_path(&worktree.root_path()) {
+        let root = home_from_worktree.join(".local/share/zed-flutter-dap");
         return Ok(proxy_binary_path_under(&root));
     }
 
@@ -375,6 +403,12 @@ fn ensure_proxy_binary(worktree: &Worktree) -> Result<String, String> {
     let preferred_path = preferred_proxy_binary_path(worktree)?;
     if std::fs::metadata(&preferred_path).is_ok() {
         return Ok(preferred_path.to_string_lossy().into_owned());
+    }
+
+    if let Some(path_binary) = worktree.which(PROXY_BINARY) {
+        if std::fs::metadata(&path_binary).is_ok() {
+            return Ok(path_binary);
+        }
     }
 
     let temp_binary_rel = format!("{PROXY_DOWNLOAD_DIR}/{PROXY_BINARY}");
@@ -1388,6 +1422,23 @@ mod tests {
     fn proxy_temp_install_root_uses_generic_name_when_identity_missing() {
         let path = proxy_temp_install_root(None, None);
         assert_eq!(path, std::env::temp_dir().join("zed-flutter-dap"));
+    }
+
+    #[test]
+    fn infer_home_from_path_macos() {
+        let home = infer_home_from_path("/Users/alice/work/app").unwrap();
+        assert_eq!(home, PathBuf::from("/Users/alice"));
+    }
+
+    #[test]
+    fn infer_home_from_path_linux() {
+        let home = infer_home_from_path("/home/alice/work/app").unwrap();
+        assert_eq!(home, PathBuf::from("/home/alice"));
+    }
+
+    #[test]
+    fn infer_home_from_path_returns_none_for_unknown_layout() {
+        assert!(infer_home_from_path("/opt/work/app").is_none());
     }
 
     #[test]

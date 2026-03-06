@@ -11,6 +11,7 @@ use crate::proxy::{PendingMap, SharedState};
 use crate::seq::SeqAllocator;
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const HOSTED_DEVTOOLS_URL: &str = "https://devtools.flutter.dev/";
 
 #[derive(Debug, Deserialize)]
 struct SocketCommand {
@@ -99,12 +100,7 @@ async fn handle_client(
                 let s = state.read().await;
                 let resp = match &s.vm_service_uri {
                     Some(ws_uri) => {
-                        // Convert ws:// URI to DevTools URL
-                        let http_uri = ws_uri.replace("ws://", "http://").replace("/ws", "");
-                        let devtools_url = format!(
-                            "https://devtools.flutter.dev/#/?uri={}",
-                            urlencoded(&http_uri)
-                        );
+                        let devtools_url = build_devtools_url(ws_uri);
                         serde_json::json!({
                             "devtoolsUrl": devtools_url,
                             "vmServiceUri": ws_uri,
@@ -159,6 +155,10 @@ async fn handle_client(
     }
 
     Ok(())
+}
+
+fn build_devtools_url(vm_service_uri: &str) -> String {
+    format!("{HOSTED_DEVTOOLS_URL}?uri={}", urlencoded(vm_service_uri))
 }
 
 /// Minimal percent-encoding for URL query parameters.
@@ -218,6 +218,14 @@ mod tests {
         assert_eq!(
             urlencoded("http://127.0.0.1:8181/abc=/"),
             "http%3A%2F%2F127.0.0.1%3A8181%2Fabc%3D%2F"
+        );
+    }
+
+    #[test]
+    fn build_devtools_url_preserves_ws_uri() {
+        assert_eq!(
+            build_devtools_url("ws://127.0.0.1:8181/abc=/ws"),
+            "https://devtools.flutter.dev/?uri=ws%3A%2F%2F127.0.0.1%3A8181%2Fabc%3D%2Fws"
         );
     }
 
@@ -378,10 +386,10 @@ mod tests {
 
         let line = reader.next_line().await.unwrap().unwrap();
         let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert!(resp["devtoolsUrl"]
-            .as_str()
-            .unwrap()
-            .starts_with("https://devtools.flutter.dev/#/?uri="));
+        assert_eq!(
+            resp["devtoolsUrl"],
+            "https://devtools.flutter.dev/?uri=ws%3A%2F%2F127.0.0.1%3A8181%2Fabc%3D%2Fws"
+        );
         assert_eq!(resp["vmServiceUri"], "ws://127.0.0.1:8181/abc=/ws");
 
         server.abort();

@@ -120,7 +120,7 @@ echo '{"command": "callService", "arguments": {"method": "ext.flutter.inspector.
 
 # Get DevTools URL
 echo '{"command": "devtools"}' | nc -U /tmp/zed-dap-*.sock
-# → {"devtoolsUrl": "https://devtools.flutter.dev/#/?uri=...", "vmServiceUri": "ws://..."}
+# → {"devtoolsUrl": "https://devtools.flutter.dev/?uri=ws%3A%2F%2F...", "vmServiceUri": "ws://..."}
 ```
 
 ### Setup Tasks

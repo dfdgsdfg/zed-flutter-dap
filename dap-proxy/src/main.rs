@@ -1,4 +1,6 @@
+mod build_info;
 mod dap;
+mod devtools;
 mod proxy;
 mod seq;
 mod socket;
@@ -11,6 +13,7 @@ use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
+use devtools::DevToolsManager;
 use proxy::AdapterState;
 use seq::SeqAllocator;
 
@@ -48,6 +51,7 @@ async fn main() -> ExitCode {
     let pending: proxy::PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let state: proxy::SharedState = Arc::new(RwLock::new(AdapterState::default()));
     let (child_stdin_tx, child_stdin_rx) = mpsc::channel::<Vec<u8>>(256);
+    let devtools: Arc<Mutex<DevToolsManager>> = Arc::new(Mutex::new(DevToolsManager::new(cmd)));
 
     // Socket path
     let sock_path = socket::socket_path();
@@ -78,6 +82,7 @@ async fn main() -> ExitCode {
     let socket_tx = child_stdin_tx.clone();
     let socket_path_clone = sock_path.clone();
     let socket_state = Arc::clone(&state);
+    let socket_devtools = Arc::clone(&devtools);
     let socket_listener = tokio::spawn(async move {
         let _ = socket::listen(
             socket_path_clone,
@@ -85,6 +90,7 @@ async fn main() -> ExitCode {
             socket_tx,
             socket_pending,
             socket_state,
+            socket_devtools,
         )
         .await;
     });
@@ -116,6 +122,7 @@ async fn main() -> ExitCode {
 
     // Cleanup
     socket::cleanup(&sock_path);
+    devtools.lock().await.shutdown().await;
     zed_to_adapter.abort();
     adapter_to_zed.abort();
     stdin_writer.abort();

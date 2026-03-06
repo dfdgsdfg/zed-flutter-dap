@@ -5,13 +5,14 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::build_info;
+use crate::devtools::DevToolsManager;
 use crate::proxy::{PendingMap, SharedState};
 use crate::seq::SeqAllocator;
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-const HOSTED_DEVTOOLS_URL: &str = "https://devtools.flutter.dev/";
 
 #[derive(Debug, Deserialize)]
 struct SocketCommand {
@@ -50,6 +51,7 @@ pub async fn listen(
     child_stdin_tx: mpsc::Sender<Vec<u8>>,
     pending: PendingMap,
     state: SharedState,
+    devtools: Arc<Mutex<DevToolsManager>>,
 ) -> std::io::Result<()> {
     // Remove stale socket if it exists
     let _ = std::fs::remove_file(&path);
@@ -64,9 +66,12 @@ pub async fn listen(
         let child_stdin_tx = child_stdin_tx.clone();
         let pending = Arc::clone(&pending);
         let state = Arc::clone(&state);
+        let devtools = Arc::clone(&devtools);
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, seq, child_stdin_tx, pending, state).await {
+            if let Err(e) =
+                handle_client(stream, seq, child_stdin_tx, pending, state, devtools).await
+            {
                 eprintln!("[dap-proxy] socket client error: {e}");
             }
         });
@@ -79,6 +84,7 @@ async fn handle_client(
     child_stdin_tx: mpsc::Sender<Vec<u8>>,
     pending: PendingMap,
     state: SharedState,
+    devtools: Arc<Mutex<DevToolsManager>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -92,19 +98,29 @@ async fn handle_client(
                 let s = state.read().await;
                 let resp = serde_json::json!({
                     "vmServiceUri": s.vm_service_uri,
+                    "proxy": build_info::status_json(),
                 });
                 writer.write_all(format!("{resp}\n").as_bytes()).await?;
                 continue;
             }
             "devtools" => {
-                let s = state.read().await;
-                let resp = match &s.vm_service_uri {
+                let ws_uri = {
+                    let s = state.read().await;
+                    s.vm_service_uri.clone()
+                };
+                let resp = match ws_uri {
                     Some(ws_uri) => {
-                        let devtools_url = build_devtools_url(ws_uri);
-                        serde_json::json!({
-                            "devtoolsUrl": devtools_url,
-                            "vmServiceUri": ws_uri,
-                        })
+                        let devtools_url = {
+                            let mut manager = devtools.lock().await;
+                            manager.devtools_url(&ws_uri).await
+                        };
+                        match devtools_url {
+                            Ok(devtools_url) => serde_json::json!({
+                                "devtoolsUrl": devtools_url,
+                                "vmServiceUri": ws_uri,
+                            }),
+                            Err(error) => serde_json::json!({ "error": error }),
+                        }
                     }
                     None => {
                         serde_json::json!({"error": "VM service URI not available yet"})
@@ -157,26 +173,6 @@ async fn handle_client(
     Ok(())
 }
 
-fn build_devtools_url(vm_service_uri: &str) -> String {
-    format!("{HOSTED_DEVTOOLS_URL}?uri={}", urlencoded(vm_service_uri))
-}
-
-/// Minimal percent-encoding for URL query parameters.
-fn urlencoded(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            _ => {
-                result.push_str(&format!("%{b:02X}"));
-            }
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,20 +209,11 @@ mod tests {
         assert_eq!(cmd.arguments["method"], "ext.flutter.inspector.show");
     }
 
-    #[test]
-    fn urlencoded_basic() {
-        assert_eq!(
-            urlencoded("http://127.0.0.1:8181/abc=/"),
-            "http%3A%2F%2F127.0.0.1%3A8181%2Fabc%3D%2F"
-        );
-    }
-
-    #[test]
-    fn build_devtools_url_preserves_ws_uri() {
-        assert_eq!(
-            build_devtools_url("ws://127.0.0.1:8181/abc=/ws"),
-            "https://devtools.flutter.dev/?uri=ws%3A%2F%2F127.0.0.1%3A8181%2Fabc%3D%2Fws"
-        );
+    fn test_devtools_manager() -> Arc<Mutex<DevToolsManager>> {
+        Arc::new(Mutex::new(DevToolsManager::with_server_for_test(
+            "127.0.0.1",
+            9100,
+        )))
     }
 
     #[tokio::test]
@@ -237,11 +224,13 @@ mod tests {
         let pending: PendingMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let state: SharedState = Arc::new(RwLock::new(AdapterState::default()));
         let (child_tx, mut child_rx) = mpsc::channel::<Vec<u8>>(16);
+        let devtools = test_devtools_manager();
 
         let listen_path = path.clone();
         let listen_pending = Arc::clone(&pending);
         let listen_seq = Arc::clone(&seq);
         let listen_state = Arc::clone(&state);
+        let listen_devtools = Arc::clone(&devtools);
         let server = tokio::spawn(async move {
             listen(
                 listen_path,
@@ -249,6 +238,7 @@ mod tests {
                 child_tx,
                 listen_pending,
                 listen_state,
+                listen_devtools,
             )
             .await
             .ok();
@@ -310,11 +300,13 @@ mod tests {
             vm_service_uri: Some("ws://127.0.0.1:8181/abc=/ws".to_string()),
         }));
         let (child_tx, _child_rx) = mpsc::channel::<Vec<u8>>(16);
+        let devtools = test_devtools_manager();
 
         let listen_path = path.clone();
         let listen_pending = Arc::clone(&pending);
         let listen_seq = Arc::clone(&seq);
         let listen_state = Arc::clone(&state);
+        let listen_devtools = Arc::clone(&devtools);
         let server = tokio::spawn(async move {
             listen(
                 listen_path,
@@ -322,6 +314,7 @@ mod tests {
                 child_tx,
                 listen_pending,
                 listen_state,
+                listen_devtools,
             )
             .await
             .ok();
@@ -342,6 +335,9 @@ mod tests {
         let line = reader.next_line().await.unwrap().unwrap();
         let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(resp["vmServiceUri"], "ws://127.0.0.1:8181/abc=/ws");
+        assert!(resp["proxy"]["version"].as_str().is_some());
+        assert!(resp["proxy"].get("commit").is_some());
+        assert!(resp["proxy"].get("tag").is_some());
 
         server.abort();
     }
@@ -356,11 +352,13 @@ mod tests {
             vm_service_uri: Some("ws://127.0.0.1:8181/abc=/ws".to_string()),
         }));
         let (child_tx, _child_rx) = mpsc::channel::<Vec<u8>>(16);
+        let devtools = test_devtools_manager();
 
         let listen_path = path.clone();
         let listen_pending = Arc::clone(&pending);
         let listen_seq = Arc::clone(&seq);
         let listen_state = Arc::clone(&state);
+        let listen_devtools = Arc::clone(&devtools);
         let server = tokio::spawn(async move {
             listen(
                 listen_path,
@@ -368,6 +366,7 @@ mod tests {
                 child_tx,
                 listen_pending,
                 listen_state,
+                listen_devtools,
             )
             .await
             .ok();
@@ -388,7 +387,7 @@ mod tests {
         let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
             resp["devtoolsUrl"],
-            "https://devtools.flutter.dev/?uri=ws%3A%2F%2F127.0.0.1%3A8181%2Fabc%3D%2Fws"
+            "http://127.0.0.1:9100?uri=http%3A%2F%2F127.0.0.1%3A8181%2Fabc%3D%2F"
         );
         assert_eq!(resp["vmServiceUri"], "ws://127.0.0.1:8181/abc=/ws");
 
@@ -403,11 +402,13 @@ mod tests {
         let pending: PendingMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let state: SharedState = Arc::new(RwLock::new(AdapterState::default()));
         let (child_tx, _child_rx) = mpsc::channel::<Vec<u8>>(16);
+        let devtools = test_devtools_manager();
 
         let listen_path = path.clone();
         let listen_pending = Arc::clone(&pending);
         let listen_seq = Arc::clone(&seq);
         let listen_state = Arc::clone(&state);
+        let listen_devtools = Arc::clone(&devtools);
         let server = tokio::spawn(async move {
             listen(
                 listen_path,
@@ -415,6 +416,7 @@ mod tests {
                 child_tx,
                 listen_pending,
                 listen_state,
+                listen_devtools,
             )
             .await
             .ok();

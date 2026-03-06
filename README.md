@@ -101,8 +101,8 @@ Flutter debug sessions automatically run through a DAP proxy that exposes a Unix
 |---------|-----------|-------------|
 | `hotReload` | `reload` | Perform a hot reload |
 | `hotRestart` | `restart` | Perform a hot restart |
-| `devtools` | — | Get a Flutter DevTools URL (opens in browser via script) |
-| `status` | — | Show the captured VM service URI |
+| `devtools` | — | Start local DevTools and return its browser URL (opens via script) |
+| `status` | — | Show the captured VM service URI and proxy build metadata |
 | `callService` | — | Call a VM service extension (pass `arguments`) |
 | `updateDebugOptions` | — | Update debug options at runtime (pass `arguments`) |
 | *any DAP command* | — | Forward any custom request to the debug adapter |
@@ -118,9 +118,13 @@ echo '{"command": "hotReload"}' | nc -U /tmp/zed-dap-*.sock
 # Call a VM service extension with arguments
 echo '{"command": "callService", "arguments": {"method": "ext.flutter.inspector.show"}}' | nc -U /tmp/zed-dap-*.sock
 
+# Show VM service URI + proxy metadata
+echo '{"command": "status"}' | nc -U /tmp/zed-dap-*.sock
+# → {"vmServiceUri": "ws://...", "proxy": {"version": "0.1.3", "commit": "e1b9193", "tag": "dap-proxy-v0.1.3"}}
+
 # Get DevTools URL
 echo '{"command": "devtools"}' | nc -U /tmp/zed-dap-*.sock
-# → {"devtoolsUrl": "https://devtools.flutter.dev/?uri=ws%3A%2F%2F...", "vmServiceUri": "ws://..."}
+# → {"devtoolsUrl": "http://127.0.0.1:9100?uri=http%3A%2F%2F...", "vmServiceUri": "ws://..."}
 ```
 
 ### Setup Tasks
@@ -175,7 +179,7 @@ Zed ←→ stdin/stdout ←→ dap-proxy ←→ stdin/stdout ←→ flutter debu
                      flutter-reload.sh / nc -U
 ```
 
-The proxy sits between Zed and the Flutter debug adapter, passing all DAP traffic through transparently. It also listens on a Unix socket for commands, which it injects as DAP requests to the adapter. The proxy intercepts `dart.debuggerUris` events to capture the VM service URI for `status` and `devtools` commands.
+The proxy sits between Zed and the Flutter debug adapter, passing all DAP traffic through transparently. It also listens on a Unix socket for commands, which it injects as DAP requests to the adapter. The proxy intercepts `dart.debuggerUris` events to capture the VM service URI, reports proxy build metadata in `status`, and starts a local `dart devtools` server on demand for the `devtools` command.
 
 Dart CLI sessions bypass the proxy entirely (hot reload is not applicable).
 
